@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+output/
+*.wav
+*.flac
+*.mp3
+!tests/fixtures/
+!tests/fixtures/*.wav
+.idea/
+.vscode/
+.DS_Store
