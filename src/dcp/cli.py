@@ -22,6 +22,7 @@ from .analysis import (
 from .audio_io import load_audio, load_stem_set, save_audio, save_stem_set
 from .config import DCPConfig, DEFAULT_CONFIG
 from .demo import run_demo
+from .labeling import run_labeling_session
 from .models import DCPError
 from .rendering import render_crossfade, render_plan, rendered_duration_s
 from .synthetic import generate_synthetic_track
@@ -76,6 +77,13 @@ def _describe_analysis(analysis: TrackAnalysis) -> str:
         f"Detected beats: {len(analysis.beat_times_s)}",
         f"Onsets:         {analysis.onset_count}",
     ]
+    if analysis.key:
+        lines.append(
+            f"Musical key:    {analysis.key} "
+            f"(Camelot {analysis.camelot_code or '?'}, confidence {analysis.key_confidence:.2f})"
+        )
+    if analysis.downbeat_times_s:
+        lines.append(f"Downbeats:      {len(analysis.downbeat_times_s)} estimated")
     if analysis.notes:
         lines.append("Notes:")
         lines.extend(f"  - {note}" for note in analysis.notes)
@@ -227,6 +235,18 @@ def _cmd_render(args: argparse.Namespace) -> int:
     song_b = load_audio(args.song_b)
     stems_a = load_stem_set(args.stems_a) if args.stems_a else None
     stems_b = load_stem_set(args.stems_b) if args.stems_b else None
+
+    if getattr(args, "separate", False):
+        from .stems import get_demucs_separator
+
+        sep = get_demucs_separator()
+        if stems_a is None:
+            print("Separating Song A stems using Demucs...")
+            stems_a = sep.separate(song_a)
+        if stems_b is None:
+            print("Separating Song B stems using Demucs...")
+            stems_b = sep.separate(song_b)
+
     analysis_a = analyze_track_with_backend(
         song_a, config.analysis, backend=args.analyzer
     )
@@ -309,7 +329,67 @@ def _cmd_render(args: argparse.Namespace) -> int:
         }
         path = _write_json(args.report_json, payload)
         print(f"Report JSON: {path}")
+
+    if getattr(args, "html", None):
+        from .visualizer import save_html_report
+
+        audio_paths = {
+            "dcp": str(Path(args.output).name),
+            "song_a": str(Path(args.song_a).name),
+            "song_b": str(Path(args.song_b).name),
+        }
+        report_data = payload if args.report_json else None
+        html_path = save_html_report(
+            args.html, plan.to_dict(), report_data, audio_paths=audio_paths
+        )
+        print(f"HTML Preview: {html_path}")
+
     return 0 if report.passed else 1
+
+
+def _cmd_label(args: argparse.Namespace) -> int:
+    config = _config_for_cli(args)
+    song_a = load_audio(args.song_a)
+    song_b = load_audio(args.song_b)
+    stems_a = load_stem_set(args.stems_a) if args.stems_a else None
+    stems_b = load_stem_set(args.stems_b) if args.stems_b else None
+    if stems_a is None and stems_b is None:
+        raise DCPError(
+            "dcp label requires stems for at least one song "
+            "(--stems-a and/or --stems-b)"
+        )
+
+    result = run_labeling_session(
+        song_a,
+        song_b,
+        stems_a=stems_a,
+        stems_b=stems_b,
+        config=config,
+        transition_s=args.transition,
+        analyzer=args.analyzer,
+        output_dir=args.out,
+        log_path=args.log,
+        max_pairs=args.max_pairs,
+        seed=args.seed,
+        note=args.note,
+    )
+
+    print("")
+    print(f"Session: {result.session_dir}")
+    print(f"Log:     {result.log_path}")
+    if result.records_written:
+        print(
+            f"Recorded {result.records_written} preference(s) from "
+            f"{len(result.candidates)} candidate(s)."
+        )
+    else:
+        print(
+            f"No preferences recorded across {len(result.candidates)} candidate(s)."
+        )
+    if result.stopped_early:
+        print("Session ended early; completed labels were kept.")
+    print("Data stays local. No model has been trained.")
+    return 0
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
@@ -379,6 +459,92 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     )
 
 
+def _cmd_separate(args: argparse.Namespace) -> int:
+    from .stems.demucs_adapter import DemucsAdapter, demucs_available
+
+    if not demucs_available():
+        print(
+            "dcp: error: Demucs stem separation requires the 'demucs' and 'torch' packages.\n"
+            "Install them with: pip install demucs torch",
+            file=sys.stderr,
+        )
+        return 2
+
+    input_path = Path(args.input)
+    if not input_path.exists():
+        print(f"dcp: error: input file not found: {input_path}", file=sys.stderr)
+        return 2
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    audio = load_audio(str(input_path))
+    adapter = DemucsAdapter(model_name=args.model)
+    print(f"Separating stems for {input_path} using Demucs ({args.model})...")
+    stems = adapter.separate(audio)
+    saved = save_stem_set(out_dir, stems)
+    print(f"Saved {len(saved)} stems to {out_dir}:")
+    for name, path in sorted(saved.items()):
+        print(f"  {name:10s} -> {path}")
+    return 0
+
+
+def _cmd_visualize(args: argparse.Namespace) -> int:
+    target = Path(args.target)
+    plan_dict = None
+    report_dict = None
+    out_path = Path(args.out) if args.out else None
+    audio_paths: dict[str, str] = {}
+
+    if target.is_dir():
+        plan_file = target / "plan.json"
+        report_file = target / "report.json"
+        if not plan_file.exists():
+            print(
+                f"dcp: error: directory {target} does not contain plan.json",
+                file=sys.stderr,
+            )
+            return 2
+        plan_dict = json.loads(plan_file.read_text(encoding="utf-8"))
+        if report_file.exists():
+            report_dict = json.loads(report_file.read_text(encoding="utf-8"))
+        if out_path is None:
+            out_path = target / "preview.html"
+
+        for name, filename in (
+            ("baseline", "baseline_crossfade.wav"),
+            ("dcp", "dcp_stem_transition.wav"),
+            ("song_a", "song_a.wav"),
+            ("song_b", "song_b.wav"),
+        ):
+            if (target / filename).exists():
+                audio_paths[name] = filename
+    elif target.is_file():
+        data = json.loads(target.read_text(encoding="utf-8"))
+        if "plan" in data and isinstance(data["plan"], dict):
+            report_dict = data
+            plan_dict = data["plan"]
+        else:
+            plan_dict = data
+        if out_path is None:
+            out_path = target.parent / f"{target.stem}_preview.html"
+    else:
+        print(f"dcp: error: target path not found: {target}", file=sys.stderr)
+        return 2
+
+    from .visualizer import save_html_report
+
+    written = save_html_report(
+        out_path, plan_dict, report_dict, audio_paths=audio_paths
+    )
+    print(f"Wrote visual transition preview: {written}")
+    if getattr(args, "open", False):
+        import webbrowser
+
+        webbrowser.open(written.as_uri())
+    return 0
+
+
 def _optional_module_status(module: str, distribution: str | None = None) -> str:
     spec = importlib.util.find_spec(module)
     if spec is None:
@@ -445,6 +611,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "  dcp crossfade song_a.wav song_b.wav baseline.wav --overlap 8\n"
             "  dcp render song_a.wav song_b.wav dcp.wav "
             "--stems-a stems/a --stems-b stems/b --strategy stem_level\n"
+            "  dcp label song_a.wav song_b.wav --stems-a stems/a "
+            "--stems-b stems/b --max-pairs 6\n"
             "  dcp validate dcp.wav --expected-duration 24\n"
             "  dcp compare baseline.wav dcp.wav\n"
         ),
@@ -464,11 +632,11 @@ def _build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("path", help="audio file to analyze")
     analyze.add_argument(
         "--analyzer",
-        choices=("auto", "basic", "librosa"),
+        choices=("auto", "basic", "librosa", "neural"),
         default="auto",
         help=(
-            "analysis backend; auto uses librosa when installed, basic is the "
-            "dependency-light fallback"
+            "analysis backend; auto uses neural when available, then librosa, "
+            "basic is the dependency-light fallback"
         ),
     )
     analyze.add_argument("--json", action="store_true", help="print JSON")
@@ -529,11 +697,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     render.add_argument(
         "--analyzer",
-        choices=("auto", "basic", "librosa"),
+        choices=("auto", "basic", "librosa", "neural"),
         default="auto",
         help=(
-            "analysis backend; auto uses librosa when installed, basic is the "
-            "dependency-light fallback"
+            "analysis backend; auto uses neural when available, then librosa, "
+            "basic is the dependency-light fallback"
         ),
     )
     render.add_argument(
@@ -543,7 +711,65 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     render.add_argument("--plan-json", help="write the transition plan as JSON")
     render.add_argument("--report-json", help="write a full render report as JSON")
+    render.add_argument(
+        "--separate",
+        action="store_true",
+        help="automatically separate stems using local Demucs if stems are not provided",
+    )
+    render.add_argument("--html", help="write an interactive HTML transition preview")
     render.set_defaults(func=_cmd_render)
+
+    label = subparsers.add_parser(
+        "label",
+        help="record local human preferences between transition candidates",
+    )
+    label.add_argument("song_a", help="Song A audio file")
+    label.add_argument("song_b", help="Song B audio file")
+    label.add_argument(
+        "--stems-a", help="directory containing Song A stem WAV files"
+    )
+    label.add_argument(
+        "--stems-b", help="directory containing Song B stem WAV files"
+    )
+    label.add_argument(
+        "--transition", type=float, default=8.0, help="transition seconds"
+    )
+    label.add_argument(
+        "--analyzer",
+        choices=("auto", "basic", "librosa", "neural"),
+        default="auto",
+        help=(
+            "analysis backend; auto uses neural when available, then librosa, "
+            "basic is the dependency-light fallback"
+        ),
+    )
+    label.add_argument(
+        "--out", default="output/labeling", help="session output directory"
+    )
+    label.add_argument(
+        "--log",
+        default=None,
+        help="JSONL preference log (default: <out>/labels.jsonl)",
+    )
+    label.add_argument(
+        "--max-pairs",
+        type=int,
+        default=None,
+        help="maximum number of pairs to compare in this session",
+    )
+    label.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="seed for pair selection and display order",
+    )
+    label.add_argument("--note", default="", help="note stored with each record")
+    label.add_argument(
+        "--no-limit",
+        action="store_true",
+        help="do not apply the automatic master gain that prevents clipping",
+    )
+    label.set_defaults(func=_cmd_label)
 
     validate = subparsers.add_parser(
         "validate", help="check duration, levels, silence, and discontinuities"
@@ -580,6 +806,37 @@ def _build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--sample-rate", type=int, default=44100)
     demo.add_argument("--seed", type=int, default=7)
     demo.set_defaults(func=_cmd_demo)
+
+    separate = subparsers.add_parser(
+        "separate",
+        help="separate an audio track into drums, bass, other, and vocals stems",
+    )
+    separate.add_argument("input", help="input audio file to separate")
+    separate.add_argument(
+        "--out", required=True, help="output directory for stem WAV files"
+    )
+    separate.add_argument(
+        "--model", default="htdemucs", help="Demucs model name (default: htdemucs)"
+    )
+    separate.set_defaults(func=_cmd_separate)
+
+    visualize = subparsers.add_parser(
+        "visualize",
+        help="generate an interactive HTML transition preview from a plan, report, or demo directory",
+    )
+    visualize.add_argument(
+        "target",
+        help="path to demo output directory, plan.json, or report.json",
+    )
+    visualize.add_argument(
+        "--out", default=None, help="output HTML path (default: <dir>/preview.html)"
+    )
+    visualize.add_argument(
+        "--open",
+        action="store_true",
+        help="open the generated HTML in the default web browser",
+    )
+    visualize.set_defaults(func=_cmd_visualize)
 
     doctor = subparsers.add_parser(
         "doctor", help="show environment, dependencies, and plugin status"

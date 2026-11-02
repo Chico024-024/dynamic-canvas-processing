@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -229,6 +230,64 @@ def test_render_missing_stem_directory_returns_two(tmp_path, capsys):
     assert "stem directory not found" in captured.err
 
 
+def test_label_command_records_preferences(tmp_path, capsys, monkeypatch):
+    paths = _synthesize(tmp_path, capsys)
+    answers = iter(["a", "tie"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    out = tmp_path / "labeling"
+    log = tmp_path / "preferences.jsonl"
+    code = main(
+        [
+            "label",
+            str(paths["a"]),
+            str(paths["b"]),
+            "--stems-a",
+            str(paths["stems_a"]),
+            "--stems-b",
+            str(paths["stems_b"]),
+            "--transition",
+            "2",
+            "--max-pairs",
+            "2",
+            "--seed",
+            "9",
+            "--out",
+            str(out),
+            "--log",
+            str(log),
+            "--note",
+            "cli",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert code == 0, captured.err
+    assert log.exists()
+    records = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len(records) == 2
+    assert records[0]["choice"] == "a"
+    assert records[1]["choice"] == "tie"
+    assert records[0]["note"] == "cli"
+    assert "No model has been trained" in captured.out
+    assert len(list(out.rglob("session.json"))) == 1
+    assert len(list(out.rglob("*.wav"))) == 5
+
+
+def test_label_requires_stems(tmp_path, capsys):
+    paths = _synthesize(tmp_path, capsys)
+    code = main(
+        [
+            "label",
+            str(paths["a"]),
+            str(paths["b"]),
+            "--transition",
+            "2",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "requires stems" in captured.err
+
+
 def test_validate_exit_codes_and_json(tmp_path, capsys):
     paths = _synthesize(tmp_path, capsys)
     assert main(["validate", str(paths["a"]), "--json"]) == 0
@@ -312,6 +371,7 @@ def test_help_and_missing_command(capsys):
         "synthesize",
         "crossfade",
         "render",
+        "label",
         "validate",
         "compare",
         "demo",
@@ -325,12 +385,16 @@ def test_help_and_missing_command(capsys):
 
 
 def test_module_entry_point_runs_in_subprocess(tmp_path):
+    env = dict(os.environ)
+    src_dir = str(Path(__file__).resolve().parent.parent / "src")
+    env["PYTHONPATH"] = (src_dir + os.pathsep + env["PYTHONPATH"]) if "PYTHONPATH" in env else src_dir
     completed = subprocess.run(
         [sys.executable, "-m", "dcp", "--version"],
         cwd=tmp_path,
         capture_output=True,
         text=True,
         timeout=60,
+        env=env,
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "dcp 0.1.0"

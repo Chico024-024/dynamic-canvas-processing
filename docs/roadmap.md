@@ -9,16 +9,46 @@ Verified on 2026-10-29:
 
 - synthetic two-song workflow with four stems per song;
 - analysis, plans, equal-power crossfade, stem-level DCP rendering;
-- optional librosa analysis backend for detected beats and a cross-checked
-  tempo estimate, with detected-beat rhythmic planning;
+- lightweight harmonic key detection & Camelot compatibility scoring (`dcp.analysis.key_detection`);
+- downbeat estimation and bar-boundary measure snapping (`RhythmicStrategy`);
+- local Demucs source separation adapter with content-hash caching (`.dcp_cache/stems/`);
+- interactive visual transition previewer dashboard (`dcp visualize`, `preview.html`);
+- optional librosa analysis backend for detected beats and a cross-checked tempo estimate;
 - objective-based candidate search (`optimized`/RATO), with objective-only scoring;
+- a pluggable `QualityScorer` contract and local human A/B preference labeling
+  (`dcp label`) that writes a JSONL dataset without training a model;
 - WAV output, objective validation, CLI, and demo;
 - optional Advanced plugin boundary with no Advanced implementation;
-- 183 automated tests passing;
+- 265 automated tests passing;
 - 24-second baseline and DCP demo outputs, both passing validation.
 
-Detailed evidence is in the demo `report.json` and
-[`testing.md`](testing.md).
+Detailed evidence is in the demo `report.json`, [`testing.md`](testing.md), and the comprehensive commercial roadmap [`automix_advanced_plan.md`](automix_advanced_plan.md).
+
+## Preference-learning & Advanced Automix path
+
+For the full production blueprint bridging Core to Apple Music Automix quality, see [`automix_advanced_plan.md`](automix_advanced_plan.md). The plan includes:
+- **ONNX-first deployment** (BeatNet, Silero-VAD, KeyNet);
+- **Structured Parameter Policy Network** (`TransitionParams`) to avoid raw curve hallucinations;
+- **Downbeat-to-downbeat sample-accurate phase locking**;
+- **Bounded time-stretching** ($\pm 8\%$) with tempo ramp / breakdown cut fallbacks;
+- **Asynchronous lookahead precompute worker** (30–45s lookahead buffer);
+- **Multi-factor cache invalidation**: $\text{SHA256}(\text{hash}(A) + \text{hash}(B) + \text{params} + \text{ver} + \text{config} + \text{stem\_ver})$;
+- **Cryptographic telemetry hook** for royalty accounting.
+
+| Phase | What it is | Status |
+| --- | --- | --- |
+| 0 | `QualityScorer` contract; optimizer ranks through a pluggable scorer | **Implemented and tested.** Default `WeightedLossScorer` is the hand-tuned weighted sum. |
+| 1 | `dcp label`: render candidate pairs locally, ask which is better, append features and choice to JSONL | **Implemented and tested.** Local only; no absolute paths; no model. |
+| 2 | Fit a pairwise-ranking model (Bradley-Terry on `dcp label` dataset) | **Specified in `automix_advanced_plan.md`.** |
+| 3 | Structured `TransitionParams` policy & neural strategy selection | **Specified in `automix_advanced_plan.md`.** |
+| 4 | Phase locking & bounded time-stretch | **Specified in `automix_advanced_plan.md`.** |
+
+Collecting labels is necessary but not sufficient. Phase 2 also needs enough
+sessions to avoid overfitting, a held-out evaluation protocol, and listening
+evidence that the learned ranking generalizes beyond the tracks it was trained
+on. No claim that a learned scorer sounds better is made, or should be made,
+until that evidence exists. Generated preference logs are local data and are not
+committed to the repository.
 
 ## Three highest-priority next steps
 
@@ -127,7 +157,8 @@ No billing, DRM, royalty enforcement, or metering is implemented now.
 - How much does stem bleed from separation degrade a stem-level transition?
 - When is a conservative fallback preferable to an aggressive plan?
 - What latency and memory budget would a streaming integration impose?
-- Can quality scoring be calibrated without a large proprietary listening set?
+- Can quality scoring be calibrated from a modest local preference set, and how
+  many labels are needed before a learned ranking model generalizes?
 
 ## Explicit non-goals for the near term
 
@@ -145,7 +176,8 @@ No billing, DRM, royalty enforcement, or metering is implemented now.
 - **Model licensing:** a permissively licensed separator codebase does not by
   itself settle pretrained-weight or training-data terms.
 - **Quality measurement:** objective checks can pass while a transition sounds
-  wrong, and vice versa.
+  wrong, and vice versa. Pairwise labels are now collectable, but no model has
+  been trained or validated against them.
 - **Tempo ambiguity:** half/double-time confusion remains a known limitation.
 - **Scope pressure:** adding models can compromise the CPU-only, offline
   baseline. Optional components must fail gracefully.

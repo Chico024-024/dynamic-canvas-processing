@@ -8,7 +8,8 @@ from typing import Protocol, runtime_checkable
 from ..config import DCPConfig
 from ..models import DCPError, MIX_STEM, AudioBuffer, StemSet
 from .context import TransitionContext
-from .plan import EffectSpec, GainPoint, StemAutomation, TransitionPlan
+from .plan import EffectSpec, GainPoint, StemAutomation, TransitionPlan, TransitionParams
+from .alignment import calculate_phase_locked_cue_offset, PhaseLockResult
 
 _A_WINDOWS: dict[str, tuple[float, float]] = {
     "vocals": (0.0, 0.45),
@@ -232,7 +233,12 @@ def _beat_aligned_rhythm(
 
     song_end = context.song_a.duration_s
     target_start = song_end - requested_duration_s
-    candidates: list[tuple[float, int, float]] = []
+    downbeats = {
+        float(t)
+        for t in context.analysis_a.downbeat_times_s
+        if math.isfinite(float(t)) and 0.0 <= float(t) <= song_end
+    }
+    candidates: list[tuple[int, float, int, float]] = []
     for index, beat in enumerate(beats):
         if beat <= 1e-9 or beat >= song_end - 1e-9:
             continue
@@ -241,11 +247,13 @@ def _beat_aligned_rhythm(
             continue
         if len(beats) - index < beats_per_bar + 1:
             continue
-        candidates.append((abs(beat - target_start), index, duration))
+        is_downbeat = any(abs(beat - db) < 0.05 for db in downbeats) if downbeats else False
+        priority = 0 if is_downbeat else 1
+        candidates.append((priority, abs(beat - target_start), index, duration))
     if not candidates:
         return None
 
-    _, index, duration = min(candidates)
+    _, _, index, duration = min(candidates)
     anchor = beats[index]
     grid = tuple(beat - anchor for beat in beats[index:])
     bars = (len(grid) - 1) // beats_per_bar
@@ -552,7 +560,7 @@ def tempo_is_usable(context: TransitionContext) -> tuple[bool, str]:
 
 class RhythmicStrategy:
     name = "rhythmic"
-    description = "Beat-aligned stem automation, used only with reliable tempo."
+    description = "Beat-aligned stem automation with downbeat-to-downbeat phase lock, used only with reliable tempo."
 
     def plan(self, context: TransitionContext) -> TransitionPlan:
         available, reason = tempo_is_usable(context)
@@ -598,6 +606,60 @@ class RhythmicStrategy:
                 ),
             )
 
+        # Try to achieve downbeat-to-downbeat phase lock
+        phase_lock = calculate_phase_locked_cue_offset(
+            context,
+            lead_in_bars=2,
+            min_confidence=context.config.analysis.tempo_confidence_threshold,
+        )
+
+        # Phase lock variables (initialized to defaults)
+        phase_locked = False
+        anchor_downbeat_a_s = 0.0
+        cue_offset_b_s = 0.0
+        transition_start_in_a = 0.0
+        phase_lock_confidence = 0.0
+        phase_lock_anchor_b_s = 0.0
+
+        # If phase lock succeeds, adjust timing to use the phase-locked anchor
+        if phase_lock is not None and phase_lock.success:
+            phase_locked = True
+            anchor_downbeat_a_s = phase_lock.anchor_downbeat_a_s
+            phase_lock_anchor_b_s = phase_lock.anchor_downbeat_b_s
+            cue_offset_b_s = phase_lock.cue_offset_b_s
+            transition_start_in_a = phase_lock.transition_start_a_s
+            phase_lock_confidence = phase_lock.confidence
+            # The overlap duration is from transition start to end of Song A
+            duration = context.song_a.duration_s - transition_start_in_a
+            # Clamp to valid range
+            if duration > maximum:
+                duration = maximum
+            if duration < minimum:
+                duration = minimum
+            # Recalculate bars based on phase-locked duration
+            bars = max(1, int(round(duration / bar_s)))
+            duration = bars * bar_s
+            transition_start_in_a = context.song_a.duration_s - duration
+            # Maintain exact downbeat coincidence invariant:
+            # transition_start_in_a + (phase_lock_anchor_b_s - cue_offset_b_s) == anchor_downbeat_a_s
+            cue_offset_b_s = phase_lock_anchor_b_s - (anchor_downbeat_a_s - transition_start_in_a)
+            if cue_offset_b_s < 0 or cue_offset_b_s >= context.song_b.duration_s:
+                # If bar quantization pushed cue offset out of bounds, revert to exact phase_lock timing
+                transition_start_in_a = phase_lock.transition_start_a_s
+                cue_offset_b_s = phase_lock.cue_offset_b_s
+                duration = context.song_a.duration_s - transition_start_in_a
+                bars = max(1, int(round(duration / bar_s)))
+
+            reasoning.append(
+                f"Downbeat-to-downbeat phase lock achieved: Song A downbeat "
+                f"{phase_lock.anchor_downbeat_a_s:.3f}s locks to Song B downbeat "
+                f"{phase_lock.anchor_downbeat_b_s:.3f}s (confidence: {phase_lock.confidence:.2f})."
+            )
+            warnings.append(
+                f"Phase lock confidence: {phase_lock.confidence:.2f}. "
+                f"Song B cued at offset {cue_offset_b_s:.3f}s, entering at {transition_start_in_a:.3f}s."
+            )
+
         aligned = _beat_aligned_rhythm(
             context,
             requested_duration_s=context.requested_duration_s,
@@ -607,10 +669,16 @@ class RhythmicStrategy:
         )
         beat_grid: tuple[float, ...] | None = None
         anchor_beat_s: float | None = None
-        if aligned is not None:
+        if aligned is not None and not phase_locked:
+            # Only use the automatic beat alignment if phase lock didn't succeed
             duration, bars, total_beats, beat_grid, anchor_beat_s = aligned
-        else:
+        elif not phase_locked:
             total_beats = bars * beats_per_bar
+        else:
+            # Phase locked: create beat grid from the phase-locked anchor
+            total_beats = bars * beats_per_bar
+            beat_grid = tuple(beat_s * i for i in range(total_beats + 1))
+            anchor_beat_s = transition_start_in_a
 
         warnings = list(warnings)
         if abs(duration - context.requested_duration_s) > 1e-6:
@@ -712,22 +780,50 @@ class RhythmicStrategy:
             f"Song B {bpm_b:.1f} BPM "
             f"(confidence {context.analysis_b.tempo_confidence:.2f})."
         )
+        is_downbeat_aligned = False
+        if anchor_beat_s is not None and context.analysis_a.downbeat_times_s:
+            is_downbeat_aligned = any(
+                abs(anchor_beat_s - db) < 0.05 for db in context.analysis_a.downbeat_times_s
+            )
+
         if beat_grid is not None:
-            reasoning.extend(
-                [
-                    f"{relation}. {bars} bar(s) of {beats_per_bar}/4 are used "
-                    f"({total_beats} beats); the transition starts at detected "
-                    f"Song A beat {anchor_beat_s:.3f}s and ends at "
-                    f"{context.song_a.duration_s:.3f}s.",
-                    "Every fade boundary follows a detected Song A beat time "
-                    "rather than an evenly spaced tempo fraction. Song B's "
-                    "automation uses the same timing grid because its phase is "
-                    "not shifted or time-stretched.",
+            downbeat_reason = (
+                f"Transition starts on an estimated Song A downbeat ({anchor_beat_s:.3f}s, bar boundary); 4/4 meter aligned."
+                if is_downbeat_aligned
+                else (
                     "Downbeats are not detected; bar alignment assumes 4/4 "
                     "meter. Detected beats came from the "
-                    f"{context.analysis_a.analyzer!r} analyzer.",
-                ]
+                    f"{context.analysis_a.analyzer!r} analyzer."
+                )
             )
+            if phase_locked:
+                reasoning.extend(
+                    [
+                        f"{relation}. {bars} bar(s) of {beats_per_bar}/4 are used "
+                        f"({total_beats} beats); the transition starts at Song A's "
+                        f"downbeat {anchor_beat_s:.3f}s and ends at "
+                        f"{context.song_a.duration_s:.3f}s.",
+                        "Downbeat-to-downbeat phase lock: Song B's incoming downbeat "
+                        f"{phase_lock_anchor_b_s:.3f}s is precisely aligned to Song A's "
+                        f"outgoing downbeat {anchor_downbeat_a_s:.3f}s. "
+                        f"Song B is cued at offset {cue_offset_b_s:.3f}s for sample-accurate phase coherence.",
+                        downbeat_reason,
+                    ]
+                )
+            else:
+                reasoning.extend(
+                    [
+                        f"{relation}. {bars} bar(s) of {beats_per_bar}/4 are used "
+                        f"({total_beats} beats); the transition starts at detected "
+                        f"Song A beat {anchor_beat_s:.3f}s and ends at "
+                        f"{context.song_a.duration_s:.3f}s.",
+                        "Every fade boundary follows a detected Song A beat time "
+                        "rather than an evenly spaced tempo fraction. Song B's "
+                        "automation uses the same timing grid because its phase is "
+                        "not shifted or time-stretched.",
+                        downbeat_reason,
+                    ]
+                )
         else:
             reasoning.extend(
                 [
@@ -755,11 +851,24 @@ class RhythmicStrategy:
                 "stem-level timing is claimed."
             )
         if beat_grid is not None:
-            warnings.append(
-                "Rhythm planning assumes 4/4 meter and uses detected beat "
-                "times; downbeats are not detected and Song B is mixed on "
-                "Song A's timing grid without phase alignment."
-            )
+            if phase_locked:
+                warnings.append(
+                    "Rhythm planning assumes 4/4 meter and achieves downbeat-to-downbeat "
+                    "phase lock; Song B's incoming downbeat is phase-aligned to Song A's "
+                    "outgoing downbeat with sub-millisecond precision."
+                )
+            elif is_downbeat_aligned:
+                warnings.append(
+                    "Rhythm planning assumes 4/4 meter and aligns to estimated "
+                    "downbeats; Song B is mixed on Song A's timing grid without "
+                    "phase alignment."
+                )
+            else:
+                warnings.append(
+                    "Rhythm planning assumes 4/4 meter and uses detected beat "
+                    "times; downbeats are not detected and Song B is mixed on "
+                    "Song A's timing grid without phase alignment."
+                )
         else:
             warnings.append(
                 "Rhythm planning assumes 4/4 meter and relies on approximate "
@@ -778,8 +887,19 @@ class RhythmicStrategy:
             "analyzer_a": context.analysis_a.analyzer,
             "analyzer_b": context.analysis_b.analyzer,
         }
+        if is_downbeat_aligned:
+            metadata["downbeat_aligned"] = True
         if anchor_beat_s is not None:
             metadata["anchor_beat_s"] = round(anchor_beat_s, 6)
+        # Add phase lock metadata
+        if phase_locked:
+            metadata["phase_locked"] = True
+            metadata["phase_lock_confidence"] = round(phase_lock_confidence, 4)
+            metadata["anchor_downbeat_a_s"] = round(anchor_downbeat_a_s, 6)
+            metadata["anchor_downbeat_b_s"] = round(phase_lock_anchor_b_s, 6)
+            metadata["cue_offset_b_s"] = round(cue_offset_b_s, 6)
+            metadata["transition_start_a_s"] = round(transition_start_in_a, 6)
+            metadata["alignment"] = "phase_locked"
         return _make_plan(
             context,
             strategy=self.name,

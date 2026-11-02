@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib.util
 
 import numpy as np
 from scipy.signal import find_peaks, stft
 
+from .key_detection import detect_key, estimate_downbeats
+
 from ..config import DEFAULT_CONFIG, AnalysisConfig
 from ..models import AnalysisError, AudioBuffer
+
+_PYLOUDNORM_AVAILABLE = importlib.util.find_spec("pyloudnorm") is not None
+_LIBROSA_AVAILABLE = importlib.util.find_spec("librosa") is not None
 
 _DB_FLOOR = -120.0
 
@@ -41,9 +47,27 @@ class TrackAnalysis:
     notes: tuple[str, ...] = ()
     beat_times_s: tuple[float, ...] = ()
     analyzer: str = "basic"
+    key: str | None = None
+    key_confidence: float = 0.0
+    camelot_code: str | None = None
+    downbeat_times_s: tuple[float, ...] = ()
+
+    # Loudness descriptors (EBU R128)
+    loudness_lufs: float | None = None
+    loudness_lra: float | None = None
+    loudness_true_peak: float | None = None
+
+    # Timbre descriptors
+    spectral_centroid_mean: float | None = None
+    spectral_centroid_std: float | None = None
+    spectral_bandwidth_mean: float | None = None
+    spectral_flatness_mean: float | None = None
+    spectral_rolloff_mean: float | None = None
+    mfcc_mean: tuple[float, ...] = ()
+    mfcc_std: tuple[float, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        d = {
             "duration_s": round(self.duration_s, 6),
             "sample_rate": self.sample_rate,
             "channels": self.channels,
@@ -56,8 +80,37 @@ class TrackAnalysis:
             "tempo_ambiguous": self.tempo_ambiguous,
             "analyzer": self.analyzer,
             "beat_times_s": [round(t, 6) for t in self.beat_times_s],
+            "key": self.key,
+            "key_confidence": round(self.key_confidence, 4),
+            "camelot_code": self.camelot_code,
+            "downbeat_times_s": [round(t, 6) for t in self.downbeat_times_s],
             "notes": list(self.notes),
         }
+        # Loudness descriptors
+        if self.loudness_lufs is not None:
+            d["loudness_lufs"] = round(self.loudness_lufs, 2)
+        if self.loudness_lra is not None:
+            d["loudness_lra"] = round(self.loudness_lra, 2)
+        if self.loudness_true_peak is not None:
+            d["loudness_true_peak"] = round(self.loudness_true_peak, 2)
+
+        # Timbre descriptors
+        if self.spectral_centroid_mean is not None:
+            d["spectral_centroid_mean"] = round(self.spectral_centroid_mean, 2)
+        if self.spectral_centroid_std is not None:
+            d["spectral_centroid_std"] = round(self.spectral_centroid_std, 2)
+        if self.spectral_bandwidth_mean is not None:
+            d["spectral_bandwidth_mean"] = round(self.spectral_bandwidth_mean, 2)
+        if self.spectral_flatness_mean is not None:
+            d["spectral_flatness_mean"] = round(self.spectral_flatness_mean, 4)
+        if self.spectral_rolloff_mean is not None:
+            d["spectral_rolloff_mean"] = round(self.spectral_rolloff_mean, 2)
+        if self.mfcc_mean:
+            d["mfcc_mean"] = [round(x, 4) for x in self.mfcc_mean]
+        if self.mfcc_std:
+            d["mfcc_std"] = [round(x, 4) for x in self.mfcc_std]
+
+        return d
 
 
 def _silence_ratio(
@@ -172,6 +225,92 @@ def _estimate_tempo(
     return float(tempo), confidence, int(len(peaks)), ambiguous
 
 
+def _compute_loudness(
+    buffer: AudioBuffer,
+) -> tuple[float | None, float | None, float | None]:
+    """Compute EBU R128 loudness metrics (LUFS, LRA, True Peak).
+
+    Returns:
+        (integrated_loudness_lufs, loudness_range_lu, true_peak_dbtp)
+        Returns (None, None, None) if pyloudnorm is not available.
+    """
+    if not _PYLOUDNORM_AVAILABLE:
+        return None, None, None
+
+    try:
+        import pyloudnorm as pyln
+
+        mono = buffer.mono()
+        # pyloudnorm expects (channels, samples) or (samples,)
+        # Our buffer is already in float64
+        meter = pyln.Meter(buffer.sample_rate)
+        integrated_loudness = meter.integrated_loudness(mono)
+
+        # Loudness Range (LRA)
+        lra = meter.loudness_range(mono)
+
+        # True Peak - use peak of upsampled signal
+        # Simple approximation: use sample peak with a small headroom
+        true_peak = amplitude_to_dbfs(buffer.peak)
+
+        return float(integrated_loudness), float(lra), float(true_peak)
+    except Exception:
+        return None, None, None
+
+
+def _compute_timbre(
+    buffer: AudioBuffer,
+) -> tuple[
+    float | None, float | None,
+    float | None, float | None,
+    float | None,
+    tuple[float, ...], tuple[float, ...]
+]:
+    """Compute timbre descriptors.
+
+    Returns:
+        (spectral_centroid_mean, spectral_centroid_std,
+         spectral_bandwidth_mean, spectral_flatness_mean,
+         spectral_rolloff_mean, mfcc_mean, mfcc_std)
+    """
+    if not _LIBROSA_AVAILABLE:
+        return None, None, None, None, None, (), ()
+
+    try:
+        import librosa
+
+        mono = buffer.mono()
+        y = mono.astype(np.float32)
+        sr = buffer.sample_rate
+
+        # Spectral centroid
+        centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
+        centroid_mean = float(np.mean(centroid))
+        centroid_std = float(np.std(centroid))
+
+        # Spectral bandwidth
+        bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr)
+        bandwidth_mean = float(np.mean(bandwidth))
+
+        # Spectral flatness
+        flatness = librosa.feature.spectral_flatness(y=y)
+        flatness_mean = float(np.mean(flatness))
+
+        # Spectral rolloff
+        rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr)
+        rolloff_mean = float(np.mean(rolloff))
+
+        # MFCC
+        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+        mfcc_mean = tuple(float(x) for x in np.mean(mfcc, axis=1))
+        mfcc_std = tuple(float(x) for x in np.std(mfcc, axis=1))
+
+        return (centroid_mean, centroid_std, bandwidth_mean,
+                flatness_mean, rolloff_mean, mfcc_mean, mfcc_std)
+    except Exception:
+        return None, None, None, None, None, (), ()
+
+
 def analyze_track(
     buffer: AudioBuffer, config: AnalysisConfig | None = None
 ) -> TrackAnalysis:
@@ -190,11 +329,22 @@ def analyze_track(
     rms = amplitude_to_dbfs(buffer.rms)
     silence_ratio = _silence_ratio(buffer, cfg.silence_dbfs, cfg.silence_window_s)
 
+    # Compute loudness descriptors (EBU R128)
+    loudness_lufs, loudness_lra, loudness_true_peak = _compute_loudness(buffer)
+
+    # Compute timbre descriptors
+    (spectral_centroid_mean, spectral_centroid_std,
+     spectral_bandwidth_mean, spectral_flatness_mean,
+     spectral_rolloff_mean, mfcc_mean, mfcc_std) = _compute_timbre(buffer)
+
     tempo: float | None = None
     confidence = 0.0
     onset_count = 0
     ambiguous = False
     notes: list[str] = []
+    detected_key: str | None = None
+    detected_key_confidence = 0.0
+    detected_camelot: str | None = None
 
     if buffer.duration_s >= 1.0:
         mono = buffer.mono()
@@ -204,6 +354,21 @@ def analyze_track(
             )
         except Exception as exc:  # analysis must never prevent the rest of DCP
             raise AnalysisError(f"tempo estimation failed: {exc}") from exc
+
+        # Key detection — best-effort, never blocks the pipeline
+        try:
+            key_name, camelot, _mode, key_conf = detect_key(mono, buffer.sample_rate)
+            if key_name != "unknown":
+                detected_key = key_name
+                detected_key_confidence = key_conf
+                detected_camelot = camelot
+                notes.append(
+                    f"Key estimate: {key_name} (Camelot {camelot}, "
+                    f"confidence {key_conf:.2f}). Chroma-based heuristic, "
+                    "not a trained classifier."
+                )
+        except Exception:
+            pass  # key detection is informational; never fatal
 
     if tempo is None:
         notes.append(
@@ -229,6 +394,13 @@ def analyze_track(
     if silence_ratio > 0.5:
         notes.append(f"More than half of the track is near-silent ({silence_ratio:.0%}).")
 
+    # Add loudness note if available
+    if loudness_lufs is not None:
+        notes.append(
+            f"Integrated loudness: {loudness_lufs:.1f} LUFS "
+            f"(LRA: {loudness_lra:.1f} LU, True Peak: {loudness_true_peak:.1f} dBTP)."
+        )
+
     return TrackAnalysis(
         duration_s=buffer.duration_s,
         sample_rate=buffer.sample_rate,
@@ -241,4 +413,19 @@ def analyze_track(
         onset_count=onset_count,
         tempo_ambiguous=ambiguous,
         notes=tuple(notes),
+        key=detected_key,
+        key_confidence=detected_key_confidence,
+        camelot_code=detected_camelot,
+        # Loudness descriptors
+        loudness_lufs=loudness_lufs,
+        loudness_lra=loudness_lra,
+        loudness_true_peak=loudness_true_peak,
+        # Timbre descriptors
+        spectral_centroid_mean=spectral_centroid_mean,
+        spectral_centroid_std=spectral_centroid_std,
+        spectral_bandwidth_mean=spectral_bandwidth_mean,
+        spectral_flatness_mean=spectral_flatness_mean,
+        spectral_rolloff_mean=spectral_rolloff_mean,
+        mfcc_mean=mfcc_mean,
+        mfcc_std=mfcc_std,
     )

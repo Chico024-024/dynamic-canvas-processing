@@ -1,5 +1,7 @@
 """DCP Core: Dynamic Canvas Processing."""
 
+__version__ = "0.1.0"
+
 from .audio_io import load_audio, save_audio
 from .config import (
     DCPConfig,
@@ -20,8 +22,7 @@ from .models import (
 )
 from .synthetic import SyntheticTrack, generate_synthetic_track
 from .transitions import optimize_transition
-
-__version__ = "0.1.0"
+from .visualizer import generate_html_report, save_html_report
 
 __all__ = [
     "MIX_STEM",
@@ -39,8 +40,10 @@ __all__ = [
     "SyntheticTrack",
     "TransitionConfig",
     "__version__",
+    "generate_html_report",
     "generate_synthetic_track",
     "load_audio",
     "optimize_transition",
     "save_audio",
+    "save_html_report",
 ]

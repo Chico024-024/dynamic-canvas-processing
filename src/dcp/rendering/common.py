@@ -25,7 +25,13 @@ def finalize_output(
     notes: tuple[str, ...] | list[str] = (),
     label: str = "output",
 ) -> RenderResult:
-    """Validate numbers, optionally prevent clipping, and build a RenderResult."""
+    """Validate numbers, apply sample-peak limiting, and build a RenderResult.
+
+    Note: This applies digital sample-peak scaling to enforce ``cfg.peak_ceiling``
+    (default 0.999 / -0.01 dBFS) to prevent digital integer clipping. It does
+    not perform 4x oversampled ITU-R BS.1770 true-peak reconstruction limiting,
+    which is part of the Phase 3 mastering chain.
+    """
 
     cfg = config or DEFAULT_CONFIG.render
     working = np.ascontiguousarray(samples, dtype=np.float64)

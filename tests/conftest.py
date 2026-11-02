@@ -79,6 +79,10 @@ def make_analysis(
     ambiguous: bool = False,
     beat_times_s: tuple[float, ...] = (),
     analyzer: str = "basic",
+    key: str | None = None,
+    camelot_code: str | None = None,
+    key_confidence: float = 0.0,
+    downbeat_times_s: tuple[float, ...] = (),
 ) -> TrackAnalysis:
     return TrackAnalysis(
         duration_s=buffer.duration_s,
@@ -94,6 +98,10 @@ def make_analysis(
         notes=(),
         beat_times_s=tuple(beat_times_s),
         analyzer=analyzer,
+        key=key,
+        camelot_code=camelot_code,
+        key_confidence=key_confidence,
+        downbeat_times_s=tuple(downbeat_times_s),
     )
 
 

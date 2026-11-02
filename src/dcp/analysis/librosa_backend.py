@@ -15,6 +15,7 @@ import numpy as np
 from ..config import DEFAULT_CONFIG, AnalysisConfig
 from ..models import AnalysisError, AudioBuffer
 from .basic import TrackAnalysis, analyze_track
+from .key_detection import estimate_downbeats
 
 _INSTALL_HINT = 'install the optional analysis extra with: pip install -e ".[analysis]"'
 
@@ -169,6 +170,22 @@ def analyze_track_librosa(
             "unstable."
         )
 
+    # Downbeat estimation from detected beats
+    downbeat_times: tuple[float, ...] = ()
+    if len(beats) >= 4:
+        try:
+            mono_f64 = np.ascontiguousarray(buffer.mono(), dtype=np.float64)
+            downbeat_times = estimate_downbeats(
+                mono_f64, buffer.sample_rate, beats
+            )
+            if downbeat_times:
+                notes.append(
+                    f"{len(downbeat_times)} downbeats estimated from detected "
+                    "beats using spectral energy accents; assumes 4/4 meter."
+                )
+        except Exception:
+            pass  # downbeat estimation is informational
+
     return TrackAnalysis(
         duration_s=base.duration_s,
         sample_rate=base.sample_rate,
@@ -183,6 +200,10 @@ def analyze_track_librosa(
         notes=tuple(notes),
         beat_times_s=beats,
         analyzer="librosa",
+        key=base.key,
+        key_confidence=base.key_confidence,
+        camelot_code=base.camelot_code,
+        downbeat_times_s=downbeat_times,
     )
 
 

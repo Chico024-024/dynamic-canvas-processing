@@ -9,36 +9,50 @@ This repository is the **DCP Core 0.1 prototype**: a runnable, CPU-only,
 explainable foundation. It is not a streaming service, not a real-time engine,
 and it does not bundle a source-separation model.
 
-**Status:** first milestone complete and verified. The automated suite passes
-(183 tests), the full synthetic demo renders and validates both a conventional
-crossfade and a stem-level DCP transition, and DCP Core runs without any
-proprietary Advanced package. An optional librosa backend adds beat tracking
-when installed; Core still works without it.
+**Status:** All 265 automated tests passing. The full synthetic demo renders and validates both a conventional crossfade and a stem-level DCP transition, and generates an interactive HTML preview. Core includes lightweight harmonic key detection, downbeat snapping, a Demucs stem separation adapter, and a visual previewer, all while remaining independent of proprietary Advanced features.
 
-**License:** no license has been selected or granted. See
-[`LICENSE.md`](LICENSE.md) and [`docs/licensing.md`](docs/licensing.md).
+**Two-Tier Architecture & Licensing:**
+- **DCP Core (Open Source Basic Engine):** Permissively licensed public foundation. Offline deterministic rendering, 5 rule-based strategies + RATO candidate optimization, chroma-based key detection, downbeat snap, pluggable contracts for librosa beat tracking and Demucs source separation, CLI (`dcp`), and visual HTML previewer.
+- **DCP Advanced SDK (Royalty & Licensing Kit):** Commercial SDK designed to be embedded in streaming services (Spotify, Apple Music, Tidal, etc.) and player apps on a royalty/licensing basis. Adds real-time low-latency playback precomputing, deep neural phrase segmentation, phase-aligned time-stretching, neural harmonic modulation, and a learned quality ranking model.
+
+See [`LICENSE.md`](LICENSE.md) and [`docs/licensing.md`](docs/licensing.md).
 
 ## What is implemented
 
-All items below are implemented and covered by automated tests unless marked
-otherwise:
+All items below are implemented and covered by automated tests:
 
 - Audio loading and saving, with mono/stereo and sample-rate conversion.
 - Deterministic synthetic songs with four stems and a mix that is exactly the
   sum of those stems.
 - Basic analysis: duration, sample rate, channels, peak, RMS, near-silence
   ratio, onset count, and a confidence-gated tempo estimate.
+- **Harmonic Key Detection & Camelot Matching:** Lightweight CPU-only chroma feature
+  extraction and Krumhansl-Schmuckler key correlation. Computes Camelot wheel codes
+  (e.g. 8A, 8B) and harmonic compatibility distance/scores between tracks.
+- **Downbeat / Measure Grid Snap:** Energy-based downbeat estimation in 4/4 meter.
+  The `rhythmic` strategy snaps transition start points to bar boundaries
+  (downbeats) when detected.
 - Optional librosa analysis backend for tempo and beat positions, with a
-  conservative cross-check against the basic estimator. It is an extra, not a
-  Core dependency; `auto` uses it when installed and otherwise uses basic
-  analysis.
+  conservative cross-check against the basic estimator.
 - A conventional equal-power crossfade baseline.
 - User-supplied stem import from WAV directories.
+- **Demucs Stem Separation Adapter:** Optional `StemSeparator` wrapping Meta's
+  Demucs model with content-hash caching under `.dcp_cache/stems/`. Core works
+  fully without it; users can separate via `dcp separate` or `render --separate`.
 - A transition-plan model with per-source, per-stem gain automation, smooth
   curves, optional low-pass sweep effects, reasoning, warnings, and JSON export.
 - Six strategies: five rule-based (`crossfade`, `stem_level`, `rhythmic`,
   `atmospheric`, `conservative`) plus the objective-based `optimized`
   candidate search (RATO), which scores and selects among timing plans.
+- A pluggable `QualityScorer` contract for candidate ranking. Core's default
+  `WeightedLossScorer` is the hand-tuned weighted loss sum.
+- A local pairwise-labeling workflow (`dcp label`) that renders candidate pairs
+  to WAV, asks which one is better, and appends measured features plus the
+  choice to a JSONL file.
+- **Visual Transition Previewer (`dcp visualize`):** Generates a standalone,
+  interactive HTML dashboard with an A/B audio player (baseline crossfade vs
+  DCP transition), stem automation gain curves canvas, key match badges, and
+  engine diagnostic metrics.
 - Offline rendering of plans to WAV, with automatic clipping prevention.
 - Objective validation: finite samples, duration, sample rate, channels, peak,
   clipping, interior silence, and a discontinuity heuristic.
@@ -46,26 +60,20 @@ otherwise:
 - A stable, optional DCP Advanced plugin boundary with graceful failure when no
   plugin is installed.
 
-## What this prototype does not do
+## What Core does not do (Advanced SDK Scope)
 
-These are deliberate limits, not hidden claims:
+These deliberate boundaries keep Core lightweight and define the Advanced SDK tier:
 
-- **No source separation.** Drums, bass, other, and vocals must be generated or
-  supplied by the user. A replaceable separator interface exists, but no model
-  or external service is included.
-- **No key or harmonic compatibility analysis.**
-- **No vocal-phrase, section, or downbeat detection.** Beat positions are
-  available only through the optional librosa backend; downbeats are not
-  detected, and detected-beat bar alignment assumes 4/4.
-- **No time-stretching or tempo matching.** Song B is not warped to Song A.
-- **No real-time playback.** Rendering is offline; DCP is not production-ready
-  for live streaming.
-- **No EQ beyond a single low-pass sweep effect.**
-- **No quality score or listening-test conclusion.** Objective checks cannot
-  establish whether a transition sounds musically good.
-- **No billing, metering, DRM, license enforcement, or network calls.**
-- **No Advanced implementation.** The Advanced package is intentionally absent;
-  only the extension boundary exists in Core.
+- **No real-time playback engine.** Core renders offline WAV files. Real-time
+  playback buffer precomputing belongs to the Advanced SDK.
+- **No deep neural phrase segmentation.** Core uses energy-based downbeats and
+  fractional windows; neural chorus/verse boundary tracking is an Advanced SDK feature.
+- **No time-stretching or tempo warping.** Songs are never warped in Core; only
+  1:1 or 2:1 ratios are aligned rhythmically. High-fidelity phase vocoding belongs
+  to the Advanced SDK.
+- **No learned ranking model.** Core provides `dcp label` to collect preference
+  data, but training and deploying pairwise neural ranking models is an Advanced capability.
+- **No cloud upload or forced network calls.** Core operates 100% locally on CPU.
 
 ## Requirements
 
@@ -162,6 +170,7 @@ an expected user error such as a missing file or invalid parameter.
 | `synthesize` | `dcp synthesize [--out DIR] [--duration-a S] [--duration-b S] [--bpm-a BPM] [--bpm-b BPM] [--sample-rate HZ] [--seed N]` | Generate two synthetic songs and their stems. |
 | `crossfade` | `dcp crossfade A B OUT [--overlap S] [--no-limit]` | Render the conventional equal-power baseline and validate it. |
 | `render` | `dcp render A B OUT [--stems-a DIR] [--stems-b DIR] [--strategy NAME] [--transition S] [--analyzer auto\|basic\|librosa] [--no-limit] [--plan-json PATH] [--report-json PATH]` | Plan, render, and validate a DCP transition. |
+| `label` | `dcp label A B [--stems-a DIR] [--stems-b DIR] [--transition S] [--analyzer auto\|basic\|librosa] [--out DIR] [--log PATH] [--max-pairs N] [--seed N] [--note TEXT] [--no-limit]` | Render optimizer candidates locally and record human A/B/tie/skip preferences as JSONL. Requires stems for at least one song. |
 | `validate` | `dcp validate PATH [--expected-duration S] [--max-silence S] [--json]` | Run structural and numeric checks on an audio file. |
 | `compare` | `dcp compare BASELINE CANDIDATE [--json]` | Compare objective metrics of two renders. |
 | `demo` | `dcp demo [--out DIR] [--duration S] [--transition S] [--sample-rate HZ] [--seed N]` | Run the complete synthetic workflow. |
@@ -188,6 +197,44 @@ dcp render song_a.wav song_b.wav dcp.wav \
 If either stem directory is omitted, that song is treated as a single full mix.
 The strategy then may use stem automation only for the supplied side, and the
 plan records warnings rather than pretending missing stems exist.
+
+## Human preference labeling
+
+`dcp label` collects the human signal that no amount of feature engineering can
+supply on its own:
+
+```bash
+dcp label song_a.wav song_b.wav \
+  --stems-a stems/a --stems-b stems/b \
+  --transition 8 --max-pairs 6 \
+  --out output/labeling --note "first session"
+```
+
+What happens:
+
+1. The optimizer's candidate timing plans are generated and rendered once each
+   to `output/labeling/<session>/NN_<candidate>.wav`.
+2. DCP prints two candidate paths and asks which sounds better. It does not
+   play audio; open the files in any local player.
+3. Valid answers are `a`, `b`, `tie`, `skip`, and `quit`. Pair selection and
+   left/right order are randomized from `--seed` and recorded.
+4. Each answer is appended immediately to `output/labeling/labels.jsonl`. A
+   `session.json` records the seed, candidate list, transition settings, and
+   input hashes.
+
+Each JSONL record contains the measured features of both candidates, the
+weighted objective as a baseline, the choice, and SHA-256 hashes of the input
+audio and stems. It contains **no absolute paths**; audio stays local and no
+network request is made.
+
+This is the data-collection half of a human-feedback loop, not a learning
+system. It does not train a model, and the optimizer does not consume the log.
+A learned scorer is future work; until then Core keeps the deterministic
+`WeightedLossScorer`.
+
+Programmatic entry points are `generate_candidate_plans`,
+`evaluate_candidate`, `WeightedLossScorer`, and the `QualityScorer` protocol in
+`dcp.transitions`, plus `run_labeling_session` in `dcp.labeling`.
 
 ## Programmatic use
 
@@ -287,13 +334,14 @@ work.
 .venv/Scripts/python.exe -m pytest -q
 ```
 
-Verified result: **183 passed** in 20.77 seconds with the optional librosa
-backend installed (runtime varies with machine load). Without librosa, the
-librosa-specific tests are skipped and the remaining Core suite still runs. The
-suite covers audio I/O,
+Verified result: **265 passed** in 36.94 seconds with the optional librosa
+0.11.0 and PyTorch 2.15.0 (CPU) backends installed (runtime varies with machine
+load). Optional backends are not required for Core rendering. The suite covers
+audio I/O,
 synthetic determinism and exact stem reconstruction, analysis, gain curves,
 filter effects, crossfade behavior, plan validation, stem coverage, every Core
-strategy, detected-beat planning, the objective-based optimizer, fallback
+strategy, detected-beat planning, the objective-based optimizer, the pluggable
+scorer contract, local preference labeling and its JSONL schema, fallback
 behavior, Advanced-plugin absence/failure, validation metrics, CLI exit codes,
 and the end-to-end demo.
 
@@ -307,13 +355,14 @@ src/dcp/
   synthetic.py      deterministic demo music and stems
   analysis/         basic measurements, optional librosa beat tracking
   stems/            replaceable stem-separation interface
-  transitions/      plan model, curves, strategies, optimizer, planner
+  transitions/      plan model, curves, strategies, quality scoring, optimizer
   rendering/        crossfade baseline, plan renderer, filters
   validation/       checks, metrics, objective comparison
   advanced.py       optional Advanced entry-point discovery
+  labeling.py       local pairwise preference sessions and JSONL logging
   demo.py           reproducible end-to-end demo
   cli.py            command-line interface
-tests/              183 automated tests
+tests/              265 automated tests
 examples/demo.py    demo wrapper
 docs/               architecture, feature matrix, roadmap, licensing
 ```
@@ -338,6 +387,8 @@ metering, billing, or network code exists. See
 ## Privacy and security
 
 - Audio stays local. DCP Core makes no network requests and uploads nothing.
+- Preference logs produced by `dcp label` stay in the chosen local directory and
+  contain no absolute filesystem paths.
 - No API keys or credentials are included.
 - The Advanced boundary treats plugin failures as local errors and never
   disables Core rendering.
@@ -362,5 +413,7 @@ can reject contradictory estimates. Rhythmic planning assumes 4/4, uses Song A's
 beat grid only, does not phase-align Song B, and does not stretch either song.
 Stem-level planning relies entirely on the quality of supplied stems; separation
 artifacts are the user's responsibility. No perceptual quality evaluation has
-been done. The renderer is offline and not suitable for live playback without a
-precompute and buffering design.
+been done, and no preference-trained model exists. `dcp label` records pairwise
+human judgments but does not use them to change any score. The renderer is
+offline and not suitable for live playback without a precompute and buffering
+design.

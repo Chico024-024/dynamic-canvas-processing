@@ -26,9 +26,18 @@ Loss terms
 These are objective engineering proxies. They cannot establish musical quality;
 listening tests remain required (see the README). The weights are hand-tuned
 starting points, intentionally not claimed to be optimal.
+
+Candidate ranking is delegated to a pluggable :class:`QualityScorer`. Core's
+default is :class:`WeightedLossScorer`, which is exactly the hand-tuned weighted
+sum above. Supplying a different scorer changes only how candidates are ranked;
+it does not imply that any perceptual model exists.
 """
 
 from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, ClassVar, Mapping
 
 import numpy as np
 
@@ -37,6 +46,7 @@ from ..models import MIX_STEM, DCPError, PlanValidationError
 from .context import TransitionContext
 from .curves import interpolate_gain
 from .plan import StemAutomation, TransitionPlan, validate_plan
+from .quality import CandidateFeatures, QualityScorer, QualityScoringError
 from .strategies import (
     _A_WINDOWS,
     _B_WINDOWS,
@@ -47,6 +57,9 @@ from .strategies import (
     _ordered_names,
     _views,
 )
+
+if TYPE_CHECKING:
+    from ..rendering.common import RenderResult
 
 _FLOOR_DB = -120.0
 
@@ -300,7 +313,9 @@ def evaluate_losses(
     }
 
 
-def objective(losses: dict[str, float], config: DCPConfig | None = None) -> float:
+def objective(
+    losses: Mapping[str, float], config: DCPConfig | None = None
+) -> float:
     """Weighted sum of the normalized loss terms."""
 
     weights = (config or DEFAULT_CONFIG).optimization
@@ -329,14 +344,204 @@ def _weight_dict(config: DCPConfig) -> dict[str, float]:
 
 
 # ---------------------------------------------------------------------------
+# Pluggable quality scoring
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class WeightedLossScorer:
+    """Core's default scorer: the hand-tuned weighted sum of loss terms.
+
+    This is deliberate, deterministic arithmetic over measured engineering
+    proxies. It is not trained on listening data and is not a perceptual model.
+    """
+
+    config: DCPConfig = DEFAULT_CONFIG
+    name: ClassVar[str] = "weighted_loss"
+
+    def score(self, features: CandidateFeatures) -> float:
+        missing = [name for name in LOSS_NAMES if name not in features.losses]
+        if missing:
+            raise QualityScoringError(
+                "weighted_loss scorer requires every loss term; missing: "
+                + ", ".join(missing)
+            )
+        return objective(features.losses, self.config)
+
+
+@dataclass(frozen=True)
+class CandidateEvaluation:
+    """One rendered candidate with its features, scorer output, and render."""
+
+    plan: TransitionPlan
+    features: CandidateFeatures
+    score: float
+    render: "RenderResult"
+
+
+def scorer_name(scorer: QualityScorer) -> str:
+    """Validate the scorer contract and return its name."""
+
+    name = getattr(scorer, "name", None)
+    if not isinstance(name, str) or not name.strip():
+        raise QualityScoringError(
+            "a quality scorer must define a non-empty string 'name'"
+        )
+    if not callable(getattr(scorer, "score", None)):
+        raise QualityScoringError(
+            f"quality scorer {name!r} must define a callable score(features)"
+        )
+    return name
+
+
+def score_features(features: CandidateFeatures, scorer: QualityScorer) -> float:
+    """Run a scorer and reject non-numeric or non-finite output."""
+
+    name = scorer_name(scorer)
+    try:
+        value = scorer.score(features)
+    except QualityScoringError:
+        raise
+    except Exception as exc:
+        raise QualityScoringError(
+            f"quality scorer {name!r} failed on candidate "
+            f"{features.candidate!r}: {type(exc).__name__}: {exc}"
+        ) from exc
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise QualityScoringError(
+            f"quality scorer {name!r} returned {type(value).__name__} for "
+            f"candidate {features.candidate!r}; expected a number"
+        )
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        raise QualityScoringError(
+            f"quality scorer {name!r} returned a non-finite score for "
+            f"candidate {features.candidate!r}"
+        )
+    return numeric
+
+
+# ---------------------------------------------------------------------------
+# Candidate generation and evaluation
+# ---------------------------------------------------------------------------
+
+def generate_candidate_plans(context: TransitionContext) -> list[TransitionPlan]:
+    """Build every structurally valid role-timing candidate, without rendering.
+
+    Returns an empty list when no stems are available. Invalid plans are
+    skipped rather than returned, so every result can be rendered.
+    """
+
+    if context.stems_a is None and context.stems_b is None:
+        return []
+
+    config = context.config
+    duration, duration_warnings = _clamp_requested_duration(
+        context, context.requested_duration_s
+    )
+    view_a, view_b, warnings, _reasoning = _views(context)
+    warnings = list(warnings) + list(duration_warnings)
+    floor_db = config.transition.fade_floor_db
+
+    specs = _candidate_specs()[: max(1, int(config.optimization.max_candidates))]
+    plans: list[TransitionPlan] = []
+    for label, windows_a, windows_b in specs:
+        automations = _automations(
+            view_a, view_b, windows_a, windows_b, duration, floor_db
+        )
+        candidate = _make_plan(
+            context,
+            strategy="optimized",
+            duration_s=duration,
+            automations=automations,
+            reasoning=[],
+            warnings=list(warnings),
+            metadata={"candidate": label},
+        )
+        try:
+            validate_plan(candidate, config, sample_rate=context.song_a.sample_rate)
+        except PlanValidationError:
+            continue
+        plans.append(candidate)
+    return plans
+
+
+def candidate_features(
+    context: TransitionContext,
+    plan: TransitionPlan,
+    losses: Mapping[str, float],
+) -> CandidateFeatures:
+    """Describe one candidate for scoring and preference logging."""
+
+    return CandidateFeatures(
+        candidate=str(plan.metadata.get("candidate", "")),
+        losses=losses,
+        duration_s=plan.duration_s,
+        tempo_bpm=context.analysis_a.tempo_bpm,
+        automation_count=len(plan.automations),
+        gain_point_count=sum(len(a.points) for a in plan.automations),
+        effect_count=sum(len(a.effects) for a in plan.automations),
+        vocal_overlap_s=vocal_overlap_loss(plan) * plan.duration_s,
+        stem_aware=context.stems_a is not None or context.stems_b is not None,
+    )
+
+
+def evaluate_candidate(
+    context: TransitionContext,
+    plan: TransitionPlan,
+    *,
+    scorer: QualityScorer | None = None,
+) -> CandidateEvaluation:
+    """Validate, render, measure, and score one candidate plan.
+
+    Rendering or validation failures raise :class:`DCPError`; scorer failures
+    raise :class:`QualityScoringError`, which callers should surface rather than
+    treat as a rejected candidate.
+    """
+
+    # Imported lazily to avoid a transitions<->rendering import cycle.
+    from ..rendering import render_plan
+
+    config = context.config
+    validate_plan(plan, config, sample_rate=context.song_a.sample_rate)
+    result = render_plan(
+        context.song_a,
+        context.song_b,
+        plan,
+        stems_a=context.stems_a,
+        stems_b=context.stems_b,
+        config=config,
+    )
+    losses = evaluate_losses(
+        result.audio,
+        result.master_gain_db,
+        plan,
+        tempo_bpm=context.analysis_a.tempo_bpm,
+        config=config,
+    )
+    features = candidate_features(context, plan, losses)
+    active = scorer if scorer is not None else WeightedLossScorer(config)
+    return CandidateEvaluation(
+        plan=plan,
+        features=features,
+        score=score_features(features, active),
+        render=result,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Optimizer
 # ---------------------------------------------------------------------------
 
-def optimize_transition_from_context(context: TransitionContext) -> TransitionPlan:
+def optimize_transition_from_context(
+    context: TransitionContext,
+    *,
+    scorer: QualityScorer | None = None,
+) -> TransitionPlan:
     """Generate, render, and score candidate timing plans; return the best.
 
-    Falls back to the conservative plan when no stems are available (role-aware
-    optimization requires at least one song's stems).
+    Candidates are ranked by ``scorer`` (default: :class:`WeightedLossScorer`).
+    Falls back to the conservative plan when no stems are available or when no
+    candidate can be rendered.
     """
 
     config = context.config
@@ -353,67 +558,26 @@ def optimize_transition_from_context(context: TransitionContext) -> TransitionPl
             ),
         )
 
-    # Imported lazily to avoid a transitions<->rendering import cycle.
-    from ..rendering import render_plan
+    active = scorer if scorer is not None else WeightedLossScorer(config)
+    active_name = scorer_name(active)
 
     duration, duration_warnings = _clamp_requested_duration(
         context, context.requested_duration_s
     )
-    view_a, view_b, warnings, _reasoning = _views(context)
+    _view_a, _view_b, warnings, _reasoning = _views(context)
     warnings = list(warnings) + list(duration_warnings)
-    floor_db = config.transition.fade_floor_db
-    tempo_bpm = context.analysis_a.tempo_bpm
 
-    specs = _candidate_specs()[: max(1, int(config.optimization.max_candidates))]
-
-    best_score: float | None = None
-    best_plan: TransitionPlan | None = None
-    best_losses: dict[str, float] | None = None
-    best_label = ""
-    evaluated = 0
-
-    for label, windows_a, windows_b in specs:
-        automations = _automations(
-            view_a, view_b, windows_a, windows_b, duration, floor_db
-        )
-        candidate = _make_plan(
-            context,
-            strategy="optimized",
-            duration_s=duration,
-            automations=automations,
-            reasoning=[],
-            warnings=list(warnings),
-            metadata={"candidate": label},
-        )
+    plans = generate_candidate_plans(context)
+    evaluations: list[CandidateEvaluation] = []
+    for plan in plans:
         try:
-            validate_plan(candidate, config, sample_rate=context.song_a.sample_rate)
-            result = render_plan(
-                context.song_a,
-                context.song_b,
-                candidate,
-                stems_a=context.stems_a,
-                stems_b=context.stems_b,
-                config=config,
-            )
+            evaluations.append(evaluate_candidate(context, plan, scorer=active))
+        except QualityScoringError:
+            raise
         except DCPError:
             continue
 
-        losses = evaluate_losses(
-            result.audio,
-            result.master_gain_db,
-            candidate,
-            tempo_bpm=tempo_bpm,
-            config=config,
-        )
-        score = objective(losses, config)
-        evaluated += 1
-        if best_score is None or score < best_score:
-            best_score = score
-            best_plan = candidate
-            best_losses = losses
-            best_label = label
-
-    if best_plan is None or best_losses is None:
+    if not evaluations:
         return _conservative_plan(
             context,
             requested_strategy=context.requested_strategy,
@@ -423,15 +587,26 @@ def optimize_transition_from_context(context: TransitionContext) -> TransitionPl
             ),
         )
 
+    best = min(evaluations, key=lambda evaluation: evaluation.score)
+    best_losses = {name: best.features.losses[name] for name in LOSS_NAMES}
     detail = ", ".join(f"{name}={value:.3f}" for name, value in best_losses.items())
     reasoning = [
-        f"Evaluated {evaluated} candidate timing plan(s) and selected "
-        f"'{best_label}' with objective {best_score:.3f}.",
-        f"Objective terms: {detail}.",
-        "The objective is a weighted sum of normalized engineering proxies "
-        "(loudness, continuity, vocal overlap, rhythm, distortion, complexity); "
-        "it is not a perceptual quality model.",
+        f"Evaluated {len(evaluations)} candidate timing plan(s) and selected "
+        f"'{best.features.candidate}' with score {best.score:.3f}.",
     ]
+    if isinstance(active, WeightedLossScorer):
+        reasoning.append(f"Objective terms: {detail}.")
+        reasoning.append(
+            "The objective is a weighted sum of normalized engineering proxies "
+            "(loudness, continuity, vocal overlap, rhythm, distortion, "
+            "complexity); it is not a perceptual quality model."
+        )
+    else:
+        reasoning.append(f"Diagnostic loss terms: {detail}.")
+        reasoning.append(
+            f"Candidates were ranked by the pluggable scorer {active_name!r} "
+            "(lower is better); Core did not evaluate perceptual quality."
+        )
     if context.stems_a is not None and context.stems_b is not None:
         reasoning.append(
             "Independent stem automation was scheduled for both songs."
@@ -446,15 +621,21 @@ def optimize_transition_from_context(context: TransitionContext) -> TransitionPl
         context,
         strategy="optimized",
         duration_s=duration,
-        automations=best_plan.automations,
+        automations=best.plan.automations,
         reasoning=tuple(reasoning),
         warnings=tuple(warnings),
         metadata={
-            "candidate": best_label,
-            "objective": round(best_score, 6),
+            "candidate": best.features.candidate,
+            "objective": round(best.score, 6),
             "losses": {name: round(best_losses[name], 6) for name in LOSS_NAMES},
-            "weights": _weight_dict(config),
-            "candidates_evaluated": evaluated,
+            "weights": (
+                _weight_dict(config)
+                if isinstance(active, WeightedLossScorer)
+                else None
+            ),
+            "scorer": active_name,
+            "candidates_generated": len(plans),
+            "candidates_evaluated": len(evaluations),
             "stem_aware": True,
         },
     )
@@ -471,6 +652,7 @@ def optimize_transition(
     config: DCPConfig | None = None,
     analysis_a=None,
     analysis_b=None,
+    scorer: QualityScorer | None = None,
 ) -> TransitionPlan:
     """Convenience wrapper around :func:`optimize_transition_from_context`."""
 
@@ -495,20 +677,27 @@ def optimize_transition(
         requested_strategy=strategy,
         config=cfg,
     )
-    return optimize_transition_from_context(context)
+    return optimize_transition_from_context(context, scorer=scorer)
 
 
 __all__ = [
     "LOSS_NAMES",
+    "CandidateEvaluation",
+    "WeightedLossScorer",
+    "candidate_features",
     "complexity_loss",
     "continuity_loss",
     "distortion_loss",
+    "evaluate_candidate",
     "evaluate_losses",
+    "generate_candidate_plans",
     "loudness_loss",
     "musical_loss",
     "objective",
     "optimize_transition",
     "optimize_transition_from_context",
     "rhythm_loss",
+    "score_features",
+    "scorer_name",
     "vocal_overlap_loss",
 ]

@@ -266,6 +266,25 @@ def run_demo(
         encoding="utf-8",
     )
 
+    try:
+        from .visualizer import save_html_report
+
+        preview_path = root / "preview.html"
+        save_html_report(
+            preview_path,
+            plan.to_dict(),
+            report,
+            audio_paths={
+                "baseline": baseline_path.name,
+                "dcp": dcp_path.name,
+                "song_a": song_a_path.name,
+                "song_b": song_b_path.name,
+            },
+            title="DCP Demo Transition Preview",
+        )
+    except Exception:
+        preview_path = None
+
     say("")
     say("Demo complete.")
     say(f"  Song A:    {song_a_path}")
@@ -276,6 +295,8 @@ def run_demo(
     say(f"  DCP:       {dcp_path}")
     say(f"  Plan:      {plan_path}")
     say(f"  Report:    {report_path}")
+    if preview_path and preview_path.exists():
+        say(f"  Preview:   {preview_path}")
     say(
         f"  Validation: baseline "
         f"{'PASS' if baseline_report.passed else 'FAIL'}, DCP "

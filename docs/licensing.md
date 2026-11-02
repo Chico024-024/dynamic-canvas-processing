@@ -166,6 +166,12 @@ manager to fetch librosa and its dependencies from PyPI under their own terms.
 A future hosted model or service would require its own terms, privacy review,
 and explicit user authorization before audio is transmitted.
 
+The local `dcp label` workflow adds no third-party dependency; it uses the
+standard library and the existing audio stack. Preference logs are user data:
+they stay on the user's machine, are excluded from source control, and are not
+used for training in this milestone. A future training command would introduce
+its own dependency, data-handling, and model-distribution review before release.
+
 Dependencies that are dynamically loaded or invoked as separate processes may
 have different obligations from vendored code. Distribution method matters.
 
@@ -181,25 +187,41 @@ have different obligations from vendored code. Distribution method matters.
 - Model training data, model weights, source code, and generated audio are
   distinct assets with potentially different terms.
 
-## Commercial model options (not implemented)
+## Commercial model & SDK Kit monetization
 
-The architecture is intended to support future commercial structures without
-adding any of them now:
+The architecture is structured as a two-tier model:
 
-1. **Commercial integration license** - a paid license to embed DCP Advanced in
-   a product.
-2. **Annual business license** - time-limited organizational access and support.
-3. **Usage-based billing** - metered by processed minutes, renders, or active
-   users.
-4. **Per-transition or per-stream royalties** - potentially practical in some
-   distribution models, but difficult to define, audit, and reconcile with
-   privacy expectations.
-5. **Enterprise agreements** - negotiated support, indemnity, security, and
-   deployment terms.
+1. **DCP Core (Open Source Foundation):**
+   - Publicly available under a permissive open-source license (MIT or Apache-2.0).
+   - Independent, standalone, and free for developers, researchers, and creators.
+   - Core provides offline deterministic rendering, 5 baseline strategies + RATO optimization,
+     chroma key detection, downbeat snapping, pluggable contracts, and the visual previewer.
+   - Never contains telemetry, paywalls, or artificial limitations.
 
-None of these are active. No billing, payment processing, license enforcement,
-DRM, royalty collection, or telemetry exists in the prototype. Do not add fake
-license checks or artificial Core limitations.
+2. **DCP Advanced SDK (Commercial / Royalty-Based Kit):**
+   - Distributed as a licensable C++/Python SDK for embedding directly into third-party
+     and commercial audio applications.
+   - Target clients:
+     - Major music streaming platforms (**Spotify, Apple Music, YouTube Music, Amazon Music, Tidal**)
+       for continuous, DJ-style smart transitions between songs in algorithmic playlists and radio.
+     - Custom and proprietary audio player apps.
+     - Mobile applications (iOS/Android audio engine plugins).
+     - DJ software, streaming tools, and DAW ecosystems.
+   - Monetization structures:
+     - **Royalty-based licensing:** per-transition or per-stream micropayments or platform revenue share.
+     - **Embedded SDK commercial license:** recurring annual or seat-based licensing fee for app developers.
+     - **Tiered usage metering:** metered credits per active monthly listener or hours of transition rendered.
+     - **Enterprise SLA agreements:** negotiated custom deployments, dedicated models, and indemnification.
+   - Technical differentiation in Advanced SDK:
+     - Real-time low-latency playback buffer precomputing.
+     - Deep neural source separation (cloud/edge accelerated).
+     - Neural phrase and section boundary detection (verse, chorus, breakdown, drop).
+     - High-fidelity phase vocoding, time-stretching, and harmonic key pitch modulation.
+     - Trained pairwise neural ranking model for perceptual transition quality.
+     - Isolated license verification and royalty metering hooks.
+
+None of the proprietary SDK features, metering, or license verification are committed to
+this Core repository, maintaining strict legal separation and open-source integrity.
 
 ## Metering interface concepts (design only)
 

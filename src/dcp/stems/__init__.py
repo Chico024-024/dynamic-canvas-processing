@@ -1,5 +1,6 @@
-"""Stem management and the replaceable separation boundary."""
+"""Stem management, separation contracts, and optional backends."""
 
+from .demucs_adapter import DemucsAdapter, demucs_available, get_demucs_separator
 from .separation import (
     StemSeparationUnavailable,
     StemSeparator,
@@ -7,7 +8,10 @@ from .separation import (
 )
 
 __all__ = [
+    "DemucsAdapter",
     "StemSeparationUnavailable",
     "StemSeparator",
     "UnconfiguredSeparator",
+    "demucs_available",
+    "get_demucs_separator",
 ]

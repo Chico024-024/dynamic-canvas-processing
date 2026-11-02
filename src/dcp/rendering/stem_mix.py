@@ -23,8 +23,9 @@ def rendered_duration_s(
     song_a: AudioBuffer, song_b: AudioBuffer, plan: TransitionPlan
 ) -> float:
     """Duration of the output timeline for a plan."""
-
-    return max(song_a.duration_s, plan.start_time_s + song_b.duration_s)
+    cue_s = float(plan.metadata.get("cue_offset_b_s", 0.0) or 0.0)
+    remaining_b = max(0.0, song_b.duration_s - max(0.0, cue_s))
+    return max(song_a.duration_s, plan.start_time_s + remaining_b)
 
 
 def render_plan(
@@ -54,9 +55,22 @@ def render_plan(
         )
 
     sample_rate = song_a.sample_rate
+    cue_offset_b_s = float(plan.metadata.get("cue_offset_b_s", 0.0) or 0.0)
+    if cue_offset_b_s < -1e-6:
+        raise RenderError(
+            f"Song B cue offset ({cue_offset_b_s:.3f}s) cannot be negative"
+        )
+    cue_start_frames = int(round(max(0.0, cue_offset_b_s) * sample_rate))
+
+    # Determine maximum available frames for Song B across mix and all stems
+    b_max_frames = song_b.frames
+    if stems_b is not None:
+        b_max_frames = max(b_max_frames, *(buf.frames for buf in stems_b.stems.values()))
+
+    remaining_b_frames = max(0, b_max_frames - cue_start_frames)
     total_frames = max(
         song_a.frames,
-        int(round(plan.start_time_s * sample_rate)) + song_b.frames,
+        int(round(plan.start_time_s * sample_rate)) + remaining_b_frames,
     )
     output = np.zeros((song_a.channels, total_frames), dtype=np.float64)
     notes: list[str] = []
@@ -132,11 +146,39 @@ def render_plan(
         for note in cache[(automation.source, automation.stem)][1]:
             add_unique_note(notes, note)
 
-        offset_s = 0.0 if automation.source == "a" else plan.start_time_s
+        # For Song B, apply phase lock cue offset if available
+        # This slices Song B's audio starting from cue_offset_b_s seconds,
+        # so its anchor downbeat aligns with Song A's at the transition start
+        if automation.source == "a":
+            offset_s = 0.0
+            cue_start_s = 0.0
+            cue_start_frames = 0
+            audio_to_process = audio.samples
+        else:
+            offset_s = plan.start_time_s
+            cue_start_s = cue_offset_b_s
+            cue_start_frames = int(round(cue_start_s * sample_rate))
+            if cue_start_frames >= audio.frames:
+                raise RenderError(
+                    f"Song B cue offset ({cue_start_s:.3f}s) is beyond track duration "
+                    f"({audio.duration_s:.3f}s) for stem '{automation.stem}'"
+                )
+            transition_frames = int(round(plan.duration_s * sample_rate))
+            remaining_frames = audio.frames - cue_start_frames
+            # Tolerance of 1 frame for floating-point rounding
+            if remaining_frames + 1 < transition_frames:
+                remaining_s = remaining_frames / sample_rate
+                raise RenderError(
+                    f"Song B stem '{automation.stem}' has only {remaining_s:.3f}s remaining "
+                    f"after cue offset {cue_start_s:.3f}s, which cannot cover the planned "
+                    f"transition duration ({plan.duration_s:.3f}s)"
+                )
+            audio_to_process = audio.samples[:, cue_start_frames:]
+
         offset_frames = int(round(offset_s * sample_rate))
         transition_start_in_audio_s = plan.start_time_s - offset_s
 
-        processed = audio.samples
+        processed = audio_to_process
         for effect in automation.effects:
             processed = apply_lowpass_sweep(
                 AudioBuffer(processed, audio.sample_rate),
@@ -146,7 +188,8 @@ def render_plan(
                 chunk_samples=cfg.render.effect_chunk_samples,
             ).samples
 
-        local_times = np.arange(audio.frames, dtype=np.float64) / sample_rate
+        # Time axis for gain interpolation should be relative to the sliced audio
+        local_times = np.arange(audio_to_process.shape[1], dtype=np.float64) / sample_rate
         relative_times = local_times - transition_start_in_audio_s
         gains = interpolate_gain(
             automation.points,
@@ -155,7 +198,7 @@ def render_plan(
             floor_db=cfg.transition.fade_floor_db,
         )
 
-        available = min(audio.frames, total_frames - offset_frames)
+        available = min(audio_to_process.shape[1], total_frames - offset_frames)
         if available <= 0:
             continue
         output[

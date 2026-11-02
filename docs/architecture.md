@@ -48,7 +48,8 @@ part of this milestone.
 ```
 
 Supporting modules hold data models, configuration, synthetic material, optional
-stem-separation contracts, and the Advanced plugin boundary.
+stem-separation contracts, the Advanced plugin boundary, and the local
+preference-labeling workflow.
 
 ## Data representation
 
@@ -85,6 +86,11 @@ is recorded in render notes and reports.
 
 The crossfade baseline follows a shorter path: it renders the two full mixes
 with equal-power fades and validates its own output.
+
+The optional labeling path reuses planning and rendering. It generates the
+optimizer's candidates, renders each one once, writes the WAVs to a session
+directory, and records human pairwise choices. It never feeds those choices
+back into scoring.
 
 ## Analysis
 
@@ -270,6 +276,16 @@ default candidate won and the rendered audio was effectively identical to
 single plan render. The objective is not a perceptual model; listening tests
 remain required.
 
+Candidate generation and evaluation are reusable public helpers:
+`generate_candidate_plans(context)` builds every structurally valid plan
+without rendering, and `evaluate_candidate(context, plan, scorer=...)` validates,
+renders, measures, and scores one candidate. Ranking is delegated to a
+`QualityScorer`; `WeightedLossScorer` is the default and reproduces the
+hand-tuned weighted sum exactly. A scorer must return a finite number, lower is
+better. Invalid scorer output raises `QualityScoringError` instead of being
+silently treated as a rejected candidate. Plan metadata records the scorer name;
+the `weights` field is populated only when the default scorer is used.
+
 `auto` selects:
 
 1. `rhythmic` if tempo analysis is reliable for both songs;
@@ -278,6 +294,40 @@ remain required.
 
 Every strategy returns constraints and warnings; none silently escalates to an
 unimplemented capability.
+
+## Quality scoring and preference labeling
+
+`transitions/quality.py` defines the stable scorer contract:
+
+- `CandidateFeatures` records the candidate label, seven normalized losses,
+  transition duration, Song A tempo, automation/gain-point/effect counts, vocal
+  overlap in seconds, and whether stems were used.
+- `QualityScorer` requires a non-empty `name` and `score(features) -> float`,
+  with lower meaning better.
+
+Two scorers exist in practice: the Core default `WeightedLossScorer` (the
+hand-tuned objective) and any deterministic scorer a caller supplies. No scorer
+is trained, and no model artifact is loaded or shipped.
+
+`dcp label` (implemented in `labeling.py`) is the local data-collection path:
+
+1. It builds a `TransitionContext` with the same analyzer backend options as
+   rendering and calls `generate_candidate_plans`.
+2. It renders each valid candidate once through `evaluate_candidate`, saves it
+   as `<session>/NN_<candidate>.wav`, and records the weighted objective as a
+   baseline.
+3. With at least two candidates, it shuffles candidate pairs and their display
+   order using a recorded seed, then asks `a`, `b`, `tie`, `skip`, or `quit`.
+   DCP never plays audio.
+4. It appends one JSONL record per answer and writes `session.json`. Records
+   include both candidates' features, the choice, the preferred candidate,
+   transition settings, and SHA-256 hashes of the input mixes and stems.
+   Absolute paths are deliberately excluded.
+
+The log is a dataset, not a feedback loop. Nothing in Core reads it back, no
+training command exists in this milestone, and the optimizer's behavior is
+unchanged by labeled data. Phase 2 (model fitting) and Phase 3 (plugging a
+learned scorer in behind the same `QualityScorer` interface) remain future work.
 
 ## Rendering
 
@@ -411,7 +461,8 @@ performance claim.
 The suite uses synthetic signals so it is reproducible and free of third-party
 copyrighted audio. Tests cover structural validation, numeric safety, all Core
 strategies, detected-beat and tempo-fraction planning, the optional librosa
-backend, fallback paths, stem coverage, CLI exit codes, Advanced absence and
+backend, the pluggable scorer contract, local preference labeling and its JSONL
+schema, fallback paths, stem coverage, CLI exit codes, Advanced absence and
 plugin failure, and the full demo. Librosa-specific tests skip when the optional
 package is not installed, so Core remains testable with its required
 dependencies alone. See [`testing.md`](testing.md).
@@ -420,6 +471,8 @@ dependencies alone. See [`testing.md`](testing.md).
 
 - No network calls are made by Core.
 - Audio is read from and written to local paths only.
+- Preference logs stay in the chosen local directory and contain no absolute
+  paths; only content hashes and measured features are recorded.
 - No credentials or secrets are required.
 - Optional separator implementations must respect the documented local-only
   default unless the user explicitly authorizes an external service.
@@ -436,3 +489,5 @@ dependencies alone. See [`testing.md`](testing.md).
   only WAV output is documented and tested.
 - Rendering is single-process and offline; no caching or incremental render yet.
 - No listening/perceptual quality evaluation has been performed.
+- Preference labels are collected but not learned from; no trained ranking
+  model exists, and no training pipeline is implemented.

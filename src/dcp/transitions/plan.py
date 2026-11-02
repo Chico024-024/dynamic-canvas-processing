@@ -225,3 +225,58 @@ def validate_plan(
 
 def _is_finite(value: float) -> bool:
     return isinstance(value, (int, float)) and value == value and abs(value) != float("inf")
+
+
+@dataclass(frozen=True)
+class TransitionParams:
+    """
+    Structured high-level targets for a transition.
+
+    These are the discrete parameters that a policy network or strategy
+    decides on. The deterministic curve engine then builds the exact
+    smoothstep automation curves from these targets.
+
+    This replaces the old approach of generating raw (time_s, gain_db) tokens.
+    """
+
+    # Core strategy selection
+    strategy_type: str = "stem_level"  # stem_level, rhythmic, atmospheric, conservative, crossfade
+
+    # Timing structure
+    duration_bars: int = 4              # Whole bars (e.g. 4, 8, 16)
+    anchor_bar_a: int = 1               # Measure boundary in Song A where transition starts
+    anchor_bar_b: int = 1               # Measure boundary in Song B where Song B enters
+
+    # Phase locking
+    cue_offset_b_s: float = 0.0         # Song B start offset for downbeat-to-downbeat phase lock
+
+    # Stem handoff timing (relative to transition start, in seconds)
+    vocal_handoff: tuple[float, float] = (0.0, 0.0)  # (A_vocal_fade_out_s, B_vocal_fade_in_s)
+    bass_crossover_bar: int = 1         # Exact bar where low-end switches from A to B
+    drum_blend_bars: int = 2            # Drum overlap duration in bars
+
+    # Filter targets per stem (stem_name -> target_cutoff_hz)
+    filter_target_hz: Mapping[str, float] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "strategy_type": self.strategy_type,
+            "duration_bars": self.duration_bars,
+            "anchor_bar_a": self.anchor_bar_a,
+            "anchor_bar_b": self.anchor_bar_b,
+            "cue_offset_b_s": round(self.cue_offset_b_s, 6),
+            "vocal_handoff": [round(x, 6) for x in self.vocal_handoff],
+            "bass_crossover_bar": self.bass_crossover_bar,
+            "drum_blend_bars": self.drum_blend_bars,
+            "filter_target_hz": dict(self.filter_target_hz),
+        }
+
+
+__all__ = [
+    "GainPoint",
+    "EffectSpec",
+    "StemAutomation",
+    "TransitionPlan",
+    "TransitionParams",
+    "validate_plan",
+]
