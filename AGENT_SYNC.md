@@ -9,8 +9,8 @@
 
 | Agent | Current Task | Files Under Modification | Status | Last Updated |
 | :--- | :--- | :--- | :--- | :--- |
-| **Antigravity** | Ready for Phase 3 (Time-Stretch Engine) | None | Verified Green (250 passed, 5 skipped) | 2026-11-01 22:15 UTC |
-| **Claude** | Idle / Awaiting Handoff | None | Idle | - |
+| **Antigravity** | Idle / Completed Audit, Tests & GitHub Sync | None | All Green (265 passed, 0 skipped) | 2026-11-02 11:30 UTC |
+| **Claude (Fable 5)** | **Active Task**: Build DCP Web Studio (`dcp ui`) with Spotify-style Animated Visualizer | `src/dcp/ui_server.py`, `src/dcp/static/`, `src/dcp/cli.py`, `tests/test_ui_server.py` | Assigned / In Progress | 2026-11-02 11:30 UTC |
 
 ---
 
@@ -28,15 +28,12 @@
 
 ## 3. Current Engine State & Test Baseline
 
-* **Full Test Suite Status**: **`250 passed, 5 skipped`** (5 skipped are PyTorch-specific tests in an environment without PyTorch).
+* **Full Test Suite Status**: **`265 passed, 0 failed, 0 skipped in 52.7s`** (100% clean test suite).
 * **Completed & Verified Components**:
-  - `src/dcp/rendering/stem_mix.py`: Fixed source-time positioning and output duration calculation:
-    $$N_{\text{out}} = \max\left(N_A, N_{\text{start}} + \max(0, N_{B,\text{max}} - N_{\text{cue}})\right)$$
-    Validated against negative cue offsets, cue points beyond audio length, and insufficient remaining audio. 16 tests in `test_render_plan.py` pass.
-  - `src/dcp/transitions/cache.py`: Fixed `StemSet` conversion and SHA-256 key hashing for real params and stems. 15 tests in `test_cache.py` pass.
-  - `src/dcp/transitions/policy_network.py`: Resolved import cycles and frozen dataclass mutation; plan reconstruction converts dict automations back into dataclasses. 10 tests in `test_policy_network.py` pass/skip cleanly.
-  - `src/dcp/transitions/plan.py`: Cleaned duplicate `_is_finite` definition. `TransitionParams` contract established.
-  - CLI Demo (`dcp demo --out output/demo_verified`): Generates valid full-mix and stem-level transitions with HTML preview.
+  - `src/dcp/analysis/model_registry.py`: Protected by explicit `allow_download=False` guard; tested by 8 dedicated unit tests in `tests/test_model_registry.py`.
+  - Native DLL mismatch safety: Safely caught in `neural_beat.py`, `neural_key.py`, `structure.py`, `policy_network.py`, and `demucs_adapter.py` catching `(ImportError, OSError)` so Core never crashes if optional PyTorch wheels have missing DLLs.
+  - Downbeat Coincidence Law verified: $T_{\text{start}} = d_A - \Delta t_{\text{lead}}$ and $\tau_B = d_B - \Delta t_{\text{lead}}$ (0.000 ms error on impulse tests).
+  - GitHub Remote: Live and tracking at `https://github.com/Chico024-024/dynamic-canvas-processing` on `main`.
 
 ---
 
@@ -74,3 +71,84 @@
 > **Current Test Status**: **`250 passed, 5 skipped in 154.8s`** (100% clean test suite).
 > 
 > Ready to proceed to **Phase 3: Bounded Phase-Vocoder Time-Stretching ($\pm 8\%$) and Beat-Grid Phase Synchronization**.
+
+---
+
+### [2026-11-02 11:30 UTC] — From: Antigravity | To: Claude (Fable 5)
+> **Hey Claude (Fable 5)!**
+> 
+> The repository is in a pristine, verified state: **265 passed, 0 skipped, 0 failed in 52.7s**, and tracking on GitHub (`origin/main`).
+> 
+> ### Mission: Build DCP Web Studio (`dcp ui`) with Spotify-Style Animated Visualizer
+> 
+> The user wants to mix songs directly in their browser without touching the command line. They drag & drop two songs, choose a strategy, and see a real-time animated transition visualizer *"just like how Spotify shows but in the DCP way"*, with live audio playback and instant download.
+> 
+> Here is everything you need to execute this:
+> 
+> #### 1. What to Build
+> 1. **Zero-Dependency Local Server (`src/dcp/ui_server.py`)**:
+>    - Use Python's built-in `http.server` (or `wsgiref.simple_server`) so users don't need external web packages.
+>    - **Endpoints**:
+>      - `GET /`: Serve Web Studio HTML (`index.html`).
+>      - `GET /static/<path>`: Serve CSS, JS, SVG assets.
+>      - `POST /api/analyze`: Multipart/form-data with single audio upload. Runs `load_audio()` + `analyze_track_with_backend()`, returns JSON: `tempo_bpm`, `camelot_code`, `key`, `duration_s`, `peak_dbfs`, plus downsampled waveform envelope peaks (array of ~100 normalized floats) for instant visual preview.
+>      - `POST /api/mix`: Multipart/form-data with Song A, Song B, `strategy` (default: `"optimized"`), and `transition_duration` (default: `8.0`).
+>        - Runs analysis on both tracks.
+>        - Creates `TransitionContext`.
+>        - Calls `strategy.plan(context)`.
+>        - Renders DCP mix with `render_plan()`, and baseline crossfade with `render_crossfade()`.
+>        - Writes rendered outputs to `output/web_mixes/`.
+>        - Returns JSON payload:
+>          ```json
+>          {
+>            "mix_url": "/api/audio/mix_xyz.wav",
+>            "baseline_url": "/api/audio/baseline_xyz.wav",
+>            "duration_s": 24.0,
+>            "transition_start_s": 8.0,
+>            "transition_duration_s": 8.0,
+>            "downbeat_a_s": 12.0,
+>            "downbeat_b_s": 4.0,
+>            "automations": [...],
+>            "waveform_a": [...],
+>            "waveform_b": [...]
+>          }
+>          ```
+>      - `GET /api/audio/<filename>`: Streams the WAV file with `Content-Type: audio/wav` and support for byte ranges.
+> 
+> 2. **CLI Entry Point (`src/dcp/cli.py`)**:
+>    - Add the `ui` subcommand:
+>      ```powershell
+>      dcp ui [--port 8000] [--host 127.0.0.1] [--no-browser]
+>      ```
+>    - Prints server URL and launches default browser using `webbrowser.open()`.
+> 
+> 3. **Frontend UI & The "Spotify in DCP Way" Visualizer (`src/dcp/static/`)**:
+>    - `index.html`: Modern, clean semantic HTML.
+>    - `style.css`: Premium Dark Glassmorphism aesthetic (Deep charcoal `#0a0b0e`, Neon Cyan `#00f5d4` for Deck A, Neon Coral/Hot Pink `#ff007f` for Deck B, Violet `#a78bfa` for Bass, Gold `#fbbf24` for Drums, Sky Blue `#38bdf8` for Vocals).
+>    - `app.js`: 
+>      - Drag-and-drop file upload zones with instant BPM/Key preview cards.
+>      - Strategy selector pills (`Optimized`, `Rhythmic`, `Atmospheric`, `Stem-Level`).
+>      - **The Dynamic Animated Transition Canvas ("Spotify in DCP Way")**:
+>        - Two sliding waveform decks crossing over at the center.
+>        - 4 frequency/stem ribbons animating during transition (Bass drop, Drums beat-lock, Vocal handoff particles).
+>        - Glowing vertical Downbeat Phase-Lock laser line highlighting exact alignment point.
+>        - Real-time Web Audio API player with playback scrubber, pulse-to-beat particles, live A/B switch (DCP Mix vs Conventional Crossfade), and **Download Master Mix (.wav)** button.
+> 
+> 4. **Unit Tests (`tests/test_ui_server.py`)**:
+>    - Test `GET /` returns 200 and HTML.
+>    - Test `/api/analyze` with synthetic WAV returns valid JSON with BPM and key.
+>    - Test `/api/mix` returns valid mix URL and automation payload.
+> 
+> #### 2. Where to Implement
+> - New server module: [`src/dcp/ui_server.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/ui_server.py)
+> - New static assets: [`src/dcp/static/index.html`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/static/index.html), [`src/dcp/static/style.css`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/static/style.css), [`src/dcp/static/app.js`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/static/app.js)
+> - CLI registration: [`src/dcp/cli.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/cli.py)
+> - Test suite: [`tests/test_ui_server.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/tests/test_ui_server.py)
+> 
+> #### 3. How to Run & Verify
+> 1. Run tests: `.\.venv\Scripts\python.exe -m pytest -q tests/test_ui_server.py`
+> 2. Run full suite: `.\.venv\Scripts\python.exe -m pytest -q` (all must pass)
+> 3. Launch UI: `.\.venv\Scripts\dcp ui`
+> 
+> All yours, Fable 5!
+
