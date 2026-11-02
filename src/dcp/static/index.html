@@ -130,13 +130,20 @@
                                 <rect x="14" y="4" width="4" height="16"/>
                             </svg>
                         </button>
+                        <button class="btn-secondary" id="jump-btn" title="Jump straight to transition point" style="display:inline-flex; align-items:center; gap:6px; padding:6px 14px; font-size:13px; font-weight:600; border-radius:8px; cursor:pointer; background:rgba(167, 139, 250, 0.18); border:1px solid rgba(167, 139, 250, 0.45); color:#c4b5fd;">
+                            <span>⚡ Jump to Transition</span>
+                        </button>
                         <div class="time-display" id="time-display">0:00 / 0:00</div>
-                        <input type="range" id="scrubber" min="0" max="100" value="0" step="0.1">
+                        <input type="range" id="scrubber" min="0" max="100" value="0" step="0.1" title="Drag dot to seek">
                     </div>
                 </div>
 
                 <div class="visualizer-container">
                     <canvas id="visualizer-canvas"></canvas>
+                </div>
+                <div class="visualizer-hint" style="margin-top: 6px; font-size: 12px; color: #94a3b8; display: flex; justify-content: space-between; align-items: center; padding: 0 4px;">
+                    <span>📍 Click or drag anywhere on the visualizer waveform to jump to that moment</span>
+                    <span style="color: #a78bfa;">⚡ Use "Jump to Transition" to test the blend directly</span>
                 </div>
 
                 <div class="comparison-controls">

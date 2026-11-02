@@ -18,7 +18,7 @@
         duration: 0,
         audioContext: null,
         audioSource: null,
-        audioBuffer: null,
+        audioBuffers: { mix: null, baseline: null },
         gainNode: null,
         animationFrame: null,
         canvas: null,
@@ -27,6 +27,10 @@
             mix: [],
             baseline: []
         },
+        transitionStartS: 0,
+        transitionDurationS: 8,
+        songADurationS: 0,
+        songBDurationS: 0,
         currentMixId: null
     };
 
@@ -148,6 +152,12 @@
                 state.mixUrl = result.mix_url;
                 state.baselineUrl = result.baseline_url;
                 state.duration = result.duration_s || 0;
+                state.transitionStartS = result.transition_start_s || 0;
+                state.transitionDurationS = result.transition_duration_s || 8;
+                state.songADurationS = result.song_a_duration_s || 0;
+                state.songBDurationS = result.song_b_duration_s || 0;
+                state.currentTime = 0;
+                state.audioBuffers = { mix: null, baseline: null };
 
                 // Update visualizer data
                 if (result.waveform_a) state.visualizerData.mix = result.waveform_a;
@@ -188,9 +198,22 @@
         // Scrubber
         const scrubber = document.getElementById('scrubber');
         scrubber.addEventListener('input', (e) => {
-            const percent = parseFloat(e.target.value) / 100;
-            seek(percent * state.duration);
+            const fraction = parseFloat(e.target.value) / 100;
+            seek(fraction * state.duration);
         });
+
+        // Jump to transition button
+        const jumpBtn = document.getElementById('jump-btn');
+        if (jumpBtn) {
+            jumpBtn.addEventListener('click', () => {
+                if (!state.duration) return;
+                const target = Math.max(0, (state.transitionStartS || 0) - 3.5);
+                seek(target);
+                if (!state.isPlaying) {
+                    playCurrentMode();
+                }
+            });
+        }
 
         // Download
         document.getElementById('download-btn').addEventListener('click', handleDownload);
@@ -357,31 +380,14 @@
         }
     }
 
-    function playCurrentMode() {
-        initAudioContext();
-        const mode = state.currentMode;
-        const url = mode === 'mix'
-            ? (state.mixUrl || `/api/audio/mix_${state.currentMixId}.wav`)
-            : (state.baselineUrl || `/api/audio/baseline_${state.currentMixId}.wav`);
-
-        fetch(url)
-            .then(response => response.arrayBuffer())
-            .then(arrayBuffer => state.audioContext.decodeAudioData(arrayBuffer))
-            .then(audioBuffer => {
-                playAudioBuffer(audioBuffer);
-            })
-            .catch(err => {
-                console.error('Failed to load audio:', err);
-                alert('Failed to load audio: ' + err.message);
-            });
-    }
-
-    function playAudioBuffer(audioBuffer) {
+    function startSourceAt(audioBuffer, offset) {
         if (state.audioSource) {
-            state.audioSource.stop();
+            try { state.audioSource.stop(); } catch (e) {}
+            try { state.audioSource.disconnect(); } catch (e) {}
+            state.audioSource = null;
         }
 
-        state.audioBuffer = audioBuffer;
+        offset = Math.max(0, Math.min(audioBuffer.duration, offset));
         state.audioSource = state.audioContext.createBufferSource();
         state.audioSource.buffer = audioBuffer;
 
@@ -389,22 +395,58 @@
         state.audioSource.connect(state.gainNode);
         state.gainNode.connect(state.audioContext.destination);
 
-        state.audioSource.start(0, state.currentTime);
+        state.audioSource.start(0, offset);
         state.isPlaying = true;
+        state.startTime = state.audioContext.currentTime - offset;
         state.duration = audioBuffer.duration;
 
         updatePlayButton(true);
         startAnimationLoop();
     }
 
+    function playCurrentMode() {
+        initAudioContext();
+        const mode = state.currentMode;
+        const url = mode === 'mix'
+            ? (state.mixUrl || `/api/audio/mix_${state.currentMixId}.wav`)
+            : (state.baselineUrl || `/api/audio/baseline_${state.currentMixId}.wav`);
+
+        if (!url) return;
+
+        if (state.audioBuffers[mode]) {
+            startSourceAt(state.audioBuffers[mode], state.currentTime);
+            return;
+        }
+
+        const playBtn = document.getElementById('play-btn');
+        playBtn.classList.add('loading');
+        fetch(url)
+            .then(response => {
+                if (!response.ok) throw new Error('Audio file not found');
+                return response.arrayBuffer();
+            })
+            .then(arrayBuffer => state.audioContext.decodeAudioData(arrayBuffer))
+            .then(audioBuffer => {
+                playBtn.classList.remove('loading');
+                state.audioBuffers[mode] = audioBuffer;
+                state.duration = audioBuffer.duration;
+                startSourceAt(audioBuffer, state.currentTime);
+            })
+            .catch(err => {
+                playBtn.classList.remove('loading');
+                console.error('Failed to load audio:', err);
+                alert('Failed to load audio: ' + err.message);
+            });
+    }
+
     function stopPlayback() {
         if (state.audioSource) {
-            state.audioSource.stop();
-            state.audioSource.disconnect();
+            try { state.audioSource.stop(); } catch (e) {}
+            try { state.audioSource.disconnect(); } catch (e) {}
             state.audioSource = null;
         }
         if (state.gainNode) {
-            state.gainNode.disconnect();
+            try { state.gainNode.disconnect(); } catch (e) {}
             state.gainNode = null;
         }
         state.isPlaying = false;
@@ -413,16 +455,24 @@
         state.animationFrame = null;
         updatePlayButton(false);
         updateTimeDisplay(0, state.duration);
+        renderVisualizer();
     }
 
     function togglePlay() {
         if (state.isPlaying) {
-            stopPlayback();
+            if (state.audioSource) {
+                try { state.audioSource.stop(); } catch (e) {}
+                try { state.audioSource.disconnect(); } catch (e) {}
+                state.audioSource = null;
+            }
+            state.isPlaying = false;
+            cancelAnimationFrame(state.animationFrame);
+            state.animationFrame = null;
+            updatePlayButton(false);
         } else {
             playCurrentMode();
         }
     }
-
 
     function updatePlayButton(playing) {
         const btn = document.getElementById('play-btn');
@@ -433,18 +483,27 @@
         }
     }
 
-    function seek(percent) {
-        if (!state.audioBuffer) return;
-        stopPlayback();
-        state.currentTime = percent * state.duration;
-        playCurrentMode(); // This would need to seek in the audio buffer
+    function seek(targetTime) {
+        if (!state.duration) return;
+        targetTime = Math.max(0, Math.min(state.duration, targetTime));
+        state.currentTime = targetTime;
+        updateTimeDisplay(state.currentTime, state.duration);
+        renderVisualizer();
+
+        if (state.isPlaying) {
+            const buffer = state.audioBuffers[state.currentMode];
+            if (buffer) {
+                startSourceAt(buffer, state.currentTime);
+            }
+        }
     }
 
     function updateTimeDisplay(current, total) {
         const currentStr = formatTime(current);
         const totalStr = formatTime(total);
         document.getElementById('time-display').textContent = `${currentStr} / ${totalStr}`;
-        document.getElementById('scrubber').value = total > 0 ? (current / total) * 100 : 0;
+        const scrubber = document.getElementById('scrubber');
+        if (scrubber) scrubber.value = total > 0 ? (current / total) * 100 : 0;
     }
 
     function formatTime(seconds) {
@@ -482,6 +541,31 @@
 
         handleResize();
         window.addEventListener('resize', handleResize);
+
+        let isDragging = false;
+        function seekFromMouseEvent(e) {
+            if (!state.duration) return;
+            const rect = canvas.getBoundingClientRect();
+            const clientX = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
+            const fraction = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+            seek(fraction * state.duration);
+        }
+
+        canvas.addEventListener('click', seekFromMouseEvent);
+        canvas.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            seekFromMouseEvent(e);
+        });
+        window.addEventListener('mousemove', (e) => {
+            if (isDragging) {
+                seekFromMouseEvent(e);
+            }
+        });
+        window.addEventListener('mouseup', () => {
+            isDragging = false;
+        });
+
+        canvas.style.cursor = 'pointer';
     }
 
     function handleResize() {
@@ -499,6 +583,7 @@
 
     function renderVisualizer() {
         const canvas = state.canvas;
+        if (!canvas) return;
         const ctx = state.ctx;
         const width = canvas.width;
         const height = canvas.height;
@@ -507,62 +592,91 @@
         ctx.fillStyle = '#0a0b0e';
         ctx.fillRect(0, 0, width, height);
 
-        // Draw waveforms for both tracks
-        drawWaveform(ctx, state.visualizerData.mix || [], 0, height / 2, '#00f5d4');
-        drawWaveform(ctx, state.visualizerData.baseline || [], height / 2, height, '#ff007f');
+        const duration = state.duration || 1;
+        const transStart = state.transitionStartS || (duration * 0.45);
+        const transDur = state.transitionDurationS || 8;
+        const transEnd = transStart + transDur;
 
-        // Draw transition zone
-        drawTransitionZone(ctx);
+        const transStartX = (transStart / duration) * width;
+        const transEndX = Math.min(width, (transEnd / duration) * width);
+        const transWidth = Math.max(10, transEndX - transStartX);
+
+        // Draw Transition Zone Background Glow
+        ctx.save();
+        const grad = ctx.createLinearGradient(transStartX, 0, transEndX, 0);
+        grad.addColorStop(0, 'rgba(0, 245, 212, 0.15)');
+        grad.addColorStop(0.5, 'rgba(167, 139, 250, 0.3)');
+        grad.addColorStop(1, 'rgba(255, 0, 127, 0.15)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(transStartX, 0, transWidth, height);
+
+        // Transition zone border lines
+        ctx.strokeStyle = '#a78bfa';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(transStartX, 0);
+        ctx.lineTo(transStartX, height);
+        ctx.moveTo(transEndX, 0);
+        ctx.lineTo(transEndX, height);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Label transition zone
+        ctx.fillStyle = '#c4b5fd';
+        ctx.font = '10px JetBrains Mono, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`⚡ TRANSITION (${transDur.toFixed(1)}s)`, (transStartX + transEndX) / 2, 14);
+        ctx.restore();
+
+        // Draw Deck A waveform (plays from 0 to transEnd)
+        const waveformA = state.visualizerData.mix || [];
+        if (waveformA.length > 0) {
+            drawDeckWaveform(ctx, waveformA, 0, transEndX, 0, height / 2, '#00f5d4', 'DECK A');
+        }
+
+        // Draw Deck B waveform (enters at transStartX and plays to the end)
+        const waveformB = state.visualizerData.baseline || [];
+        if (waveformB.length > 0) {
+            drawDeckWaveform(ctx, waveformB, transStartX, width, height / 2, height / 2, '#ff007f', 'DECK B');
+        }
 
         // Draw playhead
         drawPlayhead(ctx);
     }
 
-    function drawWaveform(ctx, data, yOffset, height, color) {
+    function drawDeckWaveform(ctx, data, startX, endX, yOffset, laneHeight, color, label) {
         if (!data || data.length === 0) return;
+        const trackWidth = endX - startX;
+        if (trackWidth <= 1) return;
 
+        ctx.save();
         ctx.strokeStyle = color;
         ctx.lineWidth = 1.5;
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
         ctx.shadowColor = color;
-        ctx.shadowBlur = 8;
+        ctx.shadowBlur = 6;
 
-        const width = state.canvas.width;
-        const centerY = yOffset + height / 2;
-        const scale = height / 2 * 0.8;
+        const centerY = yOffset + laneHeight / 2;
+        const scale = laneHeight / 2 * 0.75;
 
         ctx.beginPath();
-        ctx.moveTo(0, centerY);
-
-        const step = width / (data.length - 1);
+        const step = trackWidth / (data.length - 1);
         for (let i = 0; i < data.length; i++) {
-            const x = i * step;
+            const x = startX + i * step;
             const y = centerY - data[i] * scale;
             if (i === 0) ctx.moveTo(x, y);
             else ctx.lineTo(x, y);
         }
         ctx.stroke();
         ctx.shadowBlur = 0;
-    }
 
-    function drawTransitionZone(ctx) {
-        const width = state.canvas.width;
-        const height = state.canvas.height;
-        const centerX = width / 2;
-        const zoneWidth = width * 0.15; // 15% of width for transition zone
-
-        ctx.save();
-        ctx.strokeStyle = '#a78bfa';
-        ctx.lineWidth = 2;
-        ctx.setLineDash([10, 10]);
-        ctx.beginPath();
-        ctx.moveTo(centerX - zoneWidth/2, 0);
-        ctx.lineTo(centerX - zoneWidth/2, height);
-        ctx.moveTo(centerX + zoneWidth/2, 0);
-        ctx.lineTo(centerX + zoneWidth/2, height);
-        ctx.stroke();
-        ctx.setLineDash([]);
+        // Lane label
+        ctx.fillStyle = color;
+        ctx.font = '9px JetBrains Mono, monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText(label, startX + 8, yOffset + 14);
         ctx.restore();
     }
 
@@ -588,7 +702,7 @@
         // Time marker
         ctx.save();
         ctx.fillStyle = '#fbbf24';
-        ctx.font = '11px JetBrains Mono';
+        ctx.font = '11px JetBrains Mono, monospace';
         ctx.textAlign = 'center';
         ctx.fillText(formatTime(state.currentTime), Math.max(30, Math.min(width - 30, x)), 20);
         ctx.restore();

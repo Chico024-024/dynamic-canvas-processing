@@ -246,6 +246,21 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                 song_a = load_audio(tmp_a_path)
                 song_b = load_audio(tmp_b_path)
 
+                # Trim trailing silence from Song A so the transition blends while Song A is actively audible
+                _, end_a_s = self._detect_effective_boundaries(song_a)
+                if end_a_s < song_a.duration_s - 1.0:
+                    end_a_frame = int(round(end_a_s * song_a.sample_rate))
+                    min_frames = int(round((transition_duration + 1.0) * song_a.sample_rate))
+                    if end_a_frame > min_frames:
+                        song_a = AudioBuffer(samples=song_a.samples[:, :end_a_frame], sample_rate=song_a.sample_rate)
+
+                # Trim leading silence from Song B so Song B enters with audible music
+                start_b_s, _ = self._detect_effective_boundaries(song_b)
+                if start_b_s > 0.3:
+                    start_b_frame = int(round(start_b_s * song_b.sample_rate))
+                    if start_b_frame < song_b.frames - int(round(transition_duration * song_b.sample_rate)):
+                        song_b = AudioBuffer(samples=song_b.samples[:, start_b_frame:], sample_rate=song_b.sample_rate)
+
                 analysis_a = analyze_track_with_backend(song_a, self.config.analysis, backend="auto")
                 analysis_b = analyze_track_with_backend(song_b, self.config.analysis, backend="auto")
 
@@ -299,6 +314,8 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                     "mix_url": f"/api/audio/mix_{mix_id}.wav",
                     "baseline_url": f"/api/audio/baseline_{mix_id}.wav",
                     "duration_s": mix_result.audio.duration_s,
+                    "song_a_duration_s": song_a.duration_s,
+                    "song_b_duration_s": song_b.duration_s,
                     "transition_start_s": plan.start_time_s,
                     "transition_duration_s": plan.duration_s,
                     "downbeat_a_s": float(plan.metadata.get("downbeat_a_s", 0.0) or 0.0),
@@ -320,6 +337,38 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
             import traceback
             traceback.print_exc()
             self._send_json_response({"error": str(e)}, status=500)
+
+    def _detect_effective_boundaries(self, audio: AudioBuffer, threshold_dbfs: float = -42.0) -> Tuple[float, float]:
+        """Detect non-silent start and end boundaries (in seconds) of an audio track."""
+        mono = audio.mono()
+        if len(mono) == 0:
+            return 0.0, audio.duration_s
+        sr = audio.sample_rate
+        hop = int(0.05 * sr)
+        if hop == 0:
+            return 0.0, audio.duration_s
+        threshold_linear = 10.0 ** (threshold_dbfs / 20.0)
+        n_hops = len(mono) // hop
+        if n_hops == 0:
+            return 0.0, audio.duration_s
+
+        # Find where audio first becomes audible
+        start_s = 0.0
+        for i in range(n_hops):
+            frame = mono[i * hop : (i + 1) * hop]
+            if np.sqrt(np.mean(frame ** 2)) >= threshold_linear:
+                start_s = max(0.0, i * 0.05 - 0.05)
+                break
+
+        # Find where audible audio ends before trailing silence/fadeout
+        end_s = audio.duration_s
+        for i in range(n_hops - 1, -1, -1):
+            frame = mono[i * hop : (i + 1) * hop]
+            if np.sqrt(np.mean(frame ** 2)) >= threshold_linear:
+                end_s = min(audio.duration_s, (i + 1) * 0.05 + 0.5)
+                break
+
+        return start_s, end_s
 
     def _generate_waveform_envelope(self, audio_or_analysis: Any, num_points: int = 100) -> List[float]:
         """Generate a simplified waveform envelope for visualization."""
