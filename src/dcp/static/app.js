@@ -128,11 +128,7 @@
                 formData.append('song_a', state.tracks.a.file);
                 formData.append('song_b', state.tracks.b.file);
                 formData.append('strategy', strategy);
-                formData.append('transition_duration', state.transitionDuration || 8.0);
-
-                // Show loading state
-                generateBtn.disabled = true;
-                generateBtn.innerHTML = '<div class="loading-spinner"></div><span>Generating...</span>';
+                formData.append('transition_duration', transitionDuration);
 
                 // Call the mix API
                 const response = await fetch('/api/mix', {
@@ -144,6 +140,8 @@
                     const error = await response.json();
                     throw new Error(error.error || 'Failed to generate transition');
                 }
+
+                const result = await response.json();
 
                 // Store the mix URLs and ID for playback/download
                 state.currentMixId = result.mix_id;
@@ -415,7 +413,6 @@
         state.animationFrame = null;
         updatePlayButton(false);
         updateTimeDisplay(0, state.duration);
-        state.scrubber.value = 0;
     }
 
     function togglePlay() {
@@ -489,14 +486,15 @@
 
     function handleResize() {
         const canvas = state.canvas;
+        if (!canvas) return;
         const container = canvas.parentElement;
+        if (!container) return;
         const rect = container.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
 
-        canvas.width = rect.width * window.devicePixelRatio;
-        canvas.height = rect.height * window.devicePixelRatio;
-        canvas.style.width = rect.width + 'px';
-        canvas.style.height = rect.height + 'px';
-        canvas.getContext('2d').scale(window.devicePixelRatio, window.devicePixelRatio);
+        canvas.width = rect.width;
+        canvas.height = rect.height;
+        renderVisualizer();
     }
 
     function renderVisualizer() {
@@ -560,16 +558,20 @@
         ctx.setLineDash([10, 10]);
         ctx.beginPath();
         ctx.moveTo(centerX - zoneWidth/2, 0);
-        ctx.lineTo(centerX - zoneWidth/2, canvas.height);
+        ctx.lineTo(centerX - zoneWidth/2, height);
         ctx.moveTo(centerX + zoneWidth/2, 0);
-        ctx.lineTo(centerX + zoneWidth/2, canvas.height);
+        ctx.lineTo(centerX + zoneWidth/2, height);
         ctx.stroke();
         ctx.setLineDash([]);
         ctx.restore();
     }
 
-    function drawPlayhead(ctx, x, progress) {
+    function drawPlayhead(ctx) {
+        if (!state.canvas) return;
+        const width = state.canvas.width;
         const height = state.canvas.height;
+        const progress = state.duration > 0 ? (state.currentTime / state.duration) : 0;
+        const x = progress * width;
 
         // Playhead line
         ctx.save();
@@ -588,7 +590,7 @@
         ctx.fillStyle = '#fbbf24';
         ctx.font = '11px JetBrains Mono';
         ctx.textAlign = 'center';
-        ctx.fillText(formatTime(state.currentTime), x, 20);
+        ctx.fillText(formatTime(state.currentTime), Math.max(30, Math.min(width - 30, x)), 20);
         ctx.restore();
     }
 
