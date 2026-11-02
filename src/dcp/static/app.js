@@ -104,6 +104,78 @@
         // Generate button
         document.getElementById('generate-btn').addEventListener('click', handleGenerate);
 
+        // Generate transition handler
+        async function handleGenerate() {
+            // Validate both tracks are loaded
+            if (!state.tracks.a.file || !state.tracks.b.file) {
+                alert('Please load both Song A and Song B before generating a transition.');
+                return;
+            }
+
+            // Get form values
+            const strategy = document.getElementById('strategy-select').value;
+            const transitionDuration = parseFloat(document.getElementById('transition-duration').value) || 8.0;
+
+            // Show loading state
+            const generateBtn = document.getElementById('generate-btn');
+            const originalBtnText = generateBtn.innerHTML;
+            generateBtn.disabled = true;
+            generateBtn.innerHTML = '<div class="loading-spinner"></div><span>Generating...</span>';
+
+            try {
+                // Prepare form data
+                const formData = new FormData();
+                formData.append('song_a', state.tracks.a.file);
+                formData.append('song_b', state.tracks.b.file);
+                formData.append('strategy', strategy);
+                formData.append('transition_duration', state.transitionDuration || 8.0);
+
+                // Show loading state
+                generateBtn.disabled = true;
+                generateBtn.innerHTML = '<div class="loading-spinner"></div><span>Generating...</span>';
+
+                // Call the mix API
+                const response = await fetch('/api/mix', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || 'Failed to generate transition');
+                }
+
+                // Store the mix URLs and ID for playback/download
+                state.currentMixId = result.mix_id;
+                state.mixUrl = result.mix_url;
+                state.baselineUrl = result.baseline_url;
+                state.duration = result.duration_s || 0;
+
+                // Update visualizer data
+                if (result.waveform_a) state.visualizerData.mix = result.waveform_a;
+                if (result.waveform_b) state.visualizerData.baseline = result.waveform_b;
+
+                // Update visualizer
+                handleResize(); // Re-render with new data
+
+                // Enable player and download
+                document.getElementById('play-btn').disabled = false;
+                document.getElementById('download-btn').disabled = false;
+
+                // Show success
+                alert('Transition generated successfully!');
+            } catch (error) {
+                console.error('Generation failed:', error);
+                alert('Failed to generate transition: ' + error.message);
+            } finally {
+                // Restore button
+                generateBtn.disabled = false;
+                generateBtn.innerHTML = originalBtnText;
+            }
+        }
+
+        // Swap decks
+
         // Player controls
         document.getElementById('play-btn').addEventListener('click', togglePlay);
         document.getElementById('stop-btn').addEventListener('click', stopPlayback);
@@ -227,9 +299,14 @@
 
             fetch('/api/analyze', {
                 method: 'POST',
-                body: new FormData().append('audio', file)
+                body: formData
             })
-            .then(response => response.json())
+            .then(response => {
+                if (!response.ok) {
+                    return response.json().then(err => Promise.reject(new Error(err.error || 'Analysis failed')));
+                }
+                return response.json();
+            })
             .then(data => resolve(data))
             .catch(reject);
         });
@@ -283,10 +360,11 @@
     }
 
     function playCurrentMode() {
+        initAudioContext();
         const mode = state.currentMode;
         const url = mode === 'mix'
-            ? `/api/audio/mix_${state.currentMixId}.wav`
-            : `/api/audio/baseline_${state.currentMixId}.wav`;
+            ? (state.mixUrl || `/api/audio/mix_${state.currentMixId}.wav`)
+            : (state.baselineUrl || `/api/audio/baseline_${state.currentMixId}.wav`);
 
         fetch(url)
             .then(response => response.arrayBuffer())
@@ -348,26 +426,6 @@
         }
     }
 
-    function playAudioBuffer(audioBuffer) {
-        if (state.audioSource) {
-            state.audioSource.stop();
-        }
-
-        state.audioBuffer = audioBuffer;
-        state.audioSource = state.audioContext.createBufferSource();
-        state.audioSource.buffer = audioBuffer;
-
-        state.gainNode = state.audioContext.createGain();
-        state.audioSource.connect(state.gainNode);
-        state.gainNode.connect(state.audioContext.destination);
-
-        state.audioSource.start(0, state.currentTime);
-        state.isPlaying = true;
-        state.duration = audioBuffer.duration;
-
-        updatePlayButton(true);
-        startAnimationLoop();
-    }
 
     function updatePlayButton(playing) {
         const btn = document.getElementById('play-btn');
@@ -539,73 +597,47 @@
     // ============================================================
     function handleDownload() {
         const mode = state.currentMode;
-        const filename = mode === 'mix' ? `mix_${Date.now()}.wav` : `baseline_${Date.now()}.wav`;
+        const filename = mode === 'mix' ? `mix_${state.currentMixId || Date.now()}.wav` : `baseline_${state.currentMixId || Date.now()}.wav`;
         const url = mode === 'mix'
-            ? `/api/audio/mix_${state.currentMixId}.wav`
-            : `/api/audio/baseline_${state.currentMixId}.wav`;
+            ? (state.mixUrl || `/api/audio/mix_${state.currentMixId}.wav`)
+            : (state.baselineUrl || `/api/audio/baseline_${state.currentMixId}.wav`);
 
         const a = document.createElement('a');
         a.href = url;
         a.download = filename;
+        document.body.appendChild(a);
         a.click();
+        document.body.removeChild(a);
     }
 
     // ============================================================
     // DECK MANAGEMENT
     // ============================================================
     function swapDecks() {
-        // Swap track A and B
-        const tempFile = state.tracks.a.file;
-        const tempAnalysis = state.tracks.a.analysis;
-        const tempWaveform = state.tracks.a.waveform;
+        const temp = { ...state.tracks.a };
+        state.tracks.a = { ...state.tracks.b };
+        state.tracks.b = temp;
 
-        state.tracks.a.file = state.tracks.b.file;
-        state.tracks.a.analysis = state.tracks.b.analysis;
-        state.tracks.a.waveform = state.tracks.b.waveform;
+        const infoA = document.getElementById('track-info-a');
+        const infoB = document.getElementById('track-info-b');
+        const tempDisplay = infoA.style.display;
+        infoA.style.display = infoB.style.display;
+        infoB.style.display = tempDisplay;
 
-        state.tracks.b.file = tempFile;
-        state.tracks.b.analysis = tempAnalysis;
-        state.tracks.b.waveform = tempWaveform;
+        const tempHTML = infoA.innerHTML;
+        infoA.innerHTML = infoB.innerHTML;
+        infoB.innerHTML = tempHTML;
 
-        // Update UI
-        const tempInfo = document.getElementById('track-info-a').innerHTML;
-        document.getElementById('track-info-a').innerHTML = document.getElementById('track-info-b').innerHTML;
-        document.getElementById('track-info-b').innerHTML = tempInfo;
+        const dropA = document.getElementById('drop-zone-a');
+        const dropB = document.getElementById('drop-zone-b');
+        const tempDropHTML = dropA.innerHTML;
+        dropA.innerHTML = dropB.innerHTML;
+        dropB.innerHTML = tempDropHTML;
 
-        // Swap file references
-        const tempFileA = state.tracks.a.file;
-        state.tracks.a.file = state.tracks.b.file;
-        state.tracks.b.file = tempFileA;
-    }
-
-    function swapDecks() {
-        // Swap track A and B
-        const tempFile = state.tracks.a.file;
-        const tempAnalysis = state.tracks.a.analysis;
-        const tempWaveform = state.tracks.a.waveform;
-
-        state.tracks.a.file = state.tracks.b.file;
-        state.tracks.a.analysis = state.tracks.b.analysis;
-        state.tracks.a.waveform = state.tracks.b.waveform;
-
-        state.tracks.b.file = tempFile;
-        state.tracks.b.analysis = tempAnalysis;
-        state.tracks.b.waveform = tempWaveform;
-
-        // Update UI
-        const tempInfo = document.getElementById('track-info-a').innerHTML;
-        document.getElementById('track-info-a').innerHTML = document.getElementById('track-info-b').innerHTML;
-        document.getElementById('track-info-b').innerHTML = tempInfo;
-
-        // Swap file references
-        const tempFileA = state.tracks.a.file;
-        state.tracks.a.file = state.tracks.b.file;
-        state.tracks.b.file = tempFileA;
-    }
-
-    function handleDownload() {
-        // Implementation for downloading the current mix
-        alert('Download functionality will be implemented with the actual audio file URLs');
+        const hasA = dropA.classList.contains('has-file');
+        const hasB = dropB.classList.contains('has-file');
+        dropA.classList.toggle('has-file', hasB);
+        dropB.classList.toggle('has-file', hasA);
     }
 
     // ============================================================

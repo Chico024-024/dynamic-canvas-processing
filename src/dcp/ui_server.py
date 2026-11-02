@@ -21,11 +21,14 @@ from urllib.parse import parse_qs, urlparse
 # Add src to path for absolute imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from dcp.audio_io import load_audio
+import numpy as np
+
+from dcp.audio_io import load_audio, save_audio
 from dcp.analysis import analyze_track_with_backend
 from dcp.config import DEFAULT_CONFIG, DCPConfig
 from dcp.models import AudioBuffer
 from dcp.transitions import TransitionContext
+from dcp.transitions.strategies import build_core_registry
 from dcp.rendering import render_plan, render_crossfade
 from dcp.validation import validate_audio
 
@@ -208,10 +211,21 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                 elif name == "song_b":
                     song_b_data = part.get("data")
                 elif name == "strategy":
-                    strategy = part.get("data", "").decode("utf-8") if isinstance(part.get("data"), bytes) else part.get("data", "optimized")
+                    raw_val = part.get("data", "")
+                    strategy = (
+                        raw_val.decode("utf-8", errors="ignore").strip()
+                        if isinstance(raw_val, bytes)
+                        else str(raw_val).strip()
+                    )
                 elif name == "transition_duration":
+                    raw_val = part.get("data", "8.0")
+                    dur_str = (
+                        raw_val.decode("utf-8", errors="ignore").strip()
+                        if isinstance(raw_val, bytes)
+                        else str(raw_val).strip()
+                    )
                     try:
-                        transition_duration = float(part.get("data", "8.0"))
+                        transition_duration = float(dur_str)
                     except (ValueError, TypeError):
                         transition_duration = 8.0
 
@@ -249,14 +263,17 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                 )
 
                 # Build planner and create plan
-                from ..transitions.strategies import build_core_registry
                 registry = build_core_registry()
-                strategy_obj = registry.get(strategy)
+                if strategy in registry:
+                    strategy_obj = registry.get(strategy)
+                elif "optimized" in registry:
+                    strategy_obj = registry.get("optimized")
+                else:
+                    strategy_obj = list(registry.items())[0][1]
                 plan = strategy_obj.plan(context)
 
                 # Render both mix and baseline
                 mix_result = render_plan(song_a, song_b, plan, stems_a=None, stems_b=None, config=self.config)
-                from ..rendering import render_crossfade
                 baseline_result = render_crossfade(song_a, song_b, overlap_s=transition_duration, config=self.config)
 
                 # Save outputs
@@ -269,25 +286,26 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                 mix_path = self.output_dir / f"mix_{mix_id}.wav"
                 baseline_path = self.output_dir / f"baseline_{mix_id}.wav"
 
-                from ..audio_io import save_audio
                 save_audio(mix_path, mix_result.audio, subtype="PCM_24")
                 save_audio(baseline_path, baseline_result.audio, subtype="PCM_24")
 
                 # Generate waveforms for visualization
-                waveform_a = self._generate_waveform_envelope(analysis_a)
-                waveform_b = self._generate_waveform_envelope(analysis_b)
+                waveform_a = self._generate_waveform_envelope(song_a)
+                waveform_b = self._generate_waveform_envelope(song_b)
 
+                plan_dict = plan.to_dict() if hasattr(plan, "to_dict") else {}
                 result = {
+                    "mix_id": mix_id,
                     "mix_url": f"/api/audio/mix_{mix_id}.wav",
                     "baseline_url": f"/api/audio/baseline_{mix_id}.wav",
                     "duration_s": mix_result.audio.duration_s,
-                    "transition_start_s": mix_result.audio.duration_s - transition_duration,
-                    "transition_duration_s": transition_duration,
-                    "downbeat_a_s": 0.0,  # Would need actual downbeat from analysis
-                    "downbeat_b_s": 0.0,
-                    "automations": [a.to_dict() for a in plan.automations] if hasattr(plan, 'automations') else [],
-                    "waveform_a": self._generate_waveform_envelope(analysis_a),
-                    "waveform_b": self._generate_waveform_envelope(analysis_b),
+                    "transition_start_s": plan.start_time_s,
+                    "transition_duration_s": plan.duration_s,
+                    "downbeat_a_s": float(plan.metadata.get("downbeat_a_s", 0.0) or 0.0),
+                    "downbeat_b_s": float(plan.metadata.get("downbeat_b_s", 0.0) or 0.0),
+                    "automations": plan_dict.get("automations", []),
+                    "waveform_a": waveform_a,
+                    "waveform_b": waveform_b,
                 }
                 self._send_json_response(result)
 
@@ -299,12 +317,27 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                     pass
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             self._send_json_response({"error": str(e)}, status=500)
 
-    def _generate_waveform_envelope(self, analysis) -> List[float]:
+    def _generate_waveform_envelope(self, audio_or_analysis: Any, num_points: int = 100) -> List[float]:
         """Generate a simplified waveform envelope for visualization."""
-        # Return a placeholder envelope - in production would use actual audio data
-        return [0.0] * 100
+        if isinstance(audio_or_analysis, AudioBuffer):
+            mono = audio_or_analysis.mono()
+            if len(mono) == 0:
+                return [0.0] * num_points
+            chunk_size = max(1, len(mono) // num_points)
+            envelope = []
+            for i in range(num_points):
+                chunk = mono[i * chunk_size : (i + 1) * chunk_size]
+                if len(chunk) > 0:
+                    peak = float(np.max(np.abs(chunk)))
+                    envelope.append(round(min(1.0, peak), 3))
+                else:
+                    envelope.append(0.0)
+            return envelope
+        return [0.0] * num_points
 
     def _get_boundary(self, content_type: str) -> Optional[bytes]:
         """Extract boundary from Content-Type header."""
@@ -327,6 +360,10 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                 continue
             headers_raw = part[:header_end].decode("utf-8", errors="ignore")
             data = part[header_end + 4:]
+            if data.endswith(b"\r\n"):
+                data = data[:-2]
+            elif data.endswith(b"\n"):
+                data = data[:-1]
 
             headers = {}
             for line in headers_raw.split("\r\n"):
@@ -348,15 +385,6 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                 "headers": headers
             })
         return parts
-
-    def _get_boundary(self, content_type: str) -> Optional[bytes]:
-        """Extract boundary from Content-Type header."""
-        if "boundary=" in content_type:
-            boundary = content_type.split("boundary=")[1].strip()
-            if boundary.startswith('"') and boundary.endswith('"'):
-                boundary = boundary[1:-1]
-            return boundary.encode()
-        return None
 
     def _send_json_response(self, data: Dict[str, Any], status: int = 200) -> None:
         """Send JSON response."""

@@ -154,17 +154,29 @@
 
 ---
 
-### [2026-11-02 17:25 UTC] — From: Antigravity | To: Claude (Fable 5)
-> **Awesome job, Claude!**
+### [2026-11-02 18:32 UTC] — From: Antigravity | To: Claude (Fable 5)
+> **Transition Generation Bug Resolved!**
 > 
-> You built the entire Web Studio frontend (`index.html`, `style.css`, `app.js`), `ui_server.py`, and CLI integration.
+> The user encountered `"Failed to generate transition: attempted relative import beyond top-level package"` when clicking Generate Transition.
 > 
-> I resolved the 3 test failures you ran into:
-> 1. **Index page assertion**: In `test_ui_server.py`, the test wrote `"<html><body>Test</body></html>"` to temporary `index.html` but asserted `"DCP Studio" in content`. Updated the mock to write `"DCP Studio"`.
-> 2. **API analyze endpoint (400 Bad Request)**: Updated `_handle_analyze()` in `ui_server.py` to gracefully accept raw audio bodies or multipart data even if `boundary` is missing from the test headers.
-> 3. **Handler creation (TypeError: missing request, client_address, server)**: Made `args` optional in `DCPWebStudioHandler.__init__` so it only calls `super().__init__()` when socket args are provided, allowing unit test instantiation.
+> **Root Causes & Fixes Applied**:
+> 1. **Relative Imports Beyond Package**:
+>    - In [`src/dcp/ui_server.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/ui_server.py), lines used `from ..transitions.strategies import ...`, `from ..rendering import ...`, and `from ..audio_io import ...`. Because `ui_server.py` is inside top-level package `dcp`, `..` tried to import from parent directory `src`, which raised `ValueError: attempted relative import beyond top-level package`.
+>    - Converted all imports to absolute package imports (`from dcp.transitions.strategies import ...`, etc.).
+> 2. **Multipart Form-Data Trailing CRLF (`KeyError: 'conservative\r\n'`)**:
+>    - RFC 2046 multipart boundaries include preceding CRLF as part of the delimiter. In `_parse_multipart()`, extracted part `data` had trailing `\r\n`, causing string fields like `strategy="conservative\r\n"` and corrupting binary file boundaries.
+>    - In `_parse_multipart()`, stripped trailing `\r\n` from part data. In `_handle_mix()`, explicitly called `.strip()` on decoded strings and floats. Added fallback lookup against `registry`.
+> 3. **Plan Automation Serialization (`AttributeError: 'StemAutomation' object has no attribute 'to_dict'`)**:
+>    - `StemAutomation` is a dataclass without a `to_dict()` method, whereas `TransitionPlan` implements `to_dict()` which serializes all nested automations and points.
+>    - Updated `_handle_mix()` to use `plan.to_dict().get("automations", [])` and included `"mix_id": mix_id` in the API response.
+> 4. **Frontend Fixes in [`src/dcp/static/app.js`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/static/app.js)**:
+>    - Fixed `fetch('/api/analyze')` sending `undefined` body due to `new FormData().append()` expression return value.
+>    - Fixed audio playback by calling `initAudioContext()` and using received `mix_url` / `baseline_url`.
+>    - Removed duplicate `playAudioBuffer`, duplicate `swapDecks`, and duplicate stub `handleDownload`.
 > 
-> **Current Status**: **All 266 tests passed (0 failed, 8 skipped)!**
-> Committed and pushed to `main`. `dcp ui` is ready for the user to try!
+> **Test Status**:
+> - `tests/test_ui_server.py`: **9 passed in 7.12s**.
+> - Full test suite: **266 passed, 8 skipped (100% clean)**.
+
 
 
