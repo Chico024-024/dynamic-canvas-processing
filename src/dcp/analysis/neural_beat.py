@@ -398,6 +398,7 @@ def analyze_track_neural(
 
 
 # Re-export librosa_available for backward compatibility
+from . import librosa_backend
 from .librosa_backend import librosa_available
 
 
@@ -422,10 +423,9 @@ def analyze_track_with_backend(
             except AnalysisError as exc:
                 # Fall through to librosa
                 pass
-        if librosa_available():
+        if librosa_backend.librosa_available():
             try:
-                from .librosa_backend import analyze_track_librosa
-                return analyze_track_librosa(buffer, config)
+                return librosa_backend.analyze_track_librosa(buffer, config)
             except AnalysisError as exc:
                 # Fall through to basic with note
                 base = analyze_track(buffer, config)
@@ -441,8 +441,7 @@ def analyze_track_with_backend(
     if normalized == "basic":
         return analyze_track(buffer, config)
     if normalized == "librosa":
-        from .librosa_backend import analyze_track_librosa
-        return analyze_track_librosa(buffer, config)
+        return librosa_backend.analyze_track_librosa(buffer, config)
     if normalized == "neural":
         return analyze_track_neural(buffer, config)
 
