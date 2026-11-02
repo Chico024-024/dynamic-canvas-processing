@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DCP Web Studio - Drag & Drop Song Mixer</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <svg class="logo" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="32" height="32" rx="6" fill="currentColor"/>
+                    <path d="M8 16L14 22L24 10" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span class="logo-text">DCP Studio</span>
+            </div>
+            <div class="header-right">
+                <span class="version-badge">v0.1.0-alpha</span>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Upload Section -->
+            <section class="upload-section">
+                <div class="upload-deck" id="deck-a" data-deck="a">
+                    <div class="deck-header">
+                        <span class="deck-label">DECK A</span>
+                        <span class="deck-color-indicator deck-a"></span>
+                    </div>
+                    <div class="drop-zone" id="drop-zone-a">
+                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        <p class="drop-text">Drag & Drop Song A</p>
+                        <p class="drop-hint">WAV, MP3, FLAC, OGG</p>
+                    </div>
+                    <div class="track-info" id="track-info-a" style="display: none;">
+                        <div class="info-row"><span class="info-label">Title:</span><span class="info-value" id="track-title-a">-</span></div>
+                        <div class="info-row"><span class="info-label">BPM:</span><span class="info-value" id="track-bpm-a">-</span></div>
+                        <div class="info-row"><span class="info-label">Key:</span><span class="info-value" id="track-key-a">-</span></div>
+                        <div class="info-row"><span class="info-label">Duration:</span><span class="info-value" id="track-dur-a">-</span></div>
+                    </div>
+                </div>
+
+                <div class="swap-arrow" id="swap-btn" title="Swap Decks">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M7 16h10M17 8h-10M7 16l5-5-5-5M17 8l-5 5 5 5"/>
+                    </svg>
+                </div>
+
+                <div class="upload-deck" id="deck-b" data-deck="b">
+                    <div class="deck-header">
+                        <span class="deck-label">DECK B</span>
+                        <span class="deck-color-indicator deck-b"></span>
+                    </div>
+                    <div class="drop-zone" id="drop-zone-b">
+                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        <p class="drop-text">Drag & Drop Song B</p>
+                        <p class="drop-hint">WAV, MP3, FLAC, OGG</p>
+                    </div>
+                    <div class="track-info" id="track-info-b" style="display: none;">
+                        <div class="info-row"><span class="info-label">Title:</span><span class="info-value" id="track-title-b">-</span></div>
+                        <div class="info-row"><span class="info-label">BPM:</span><span class="info-value" id="track-bpm-b">-</span></div>
+                        <div class="info-row"><span class="info-label">Key:</span><span class="info-value" id="track-key-b">-</span></div>
+                        <div class="info-row"><span class="info-label">Duration:</span><span class="info-value" id="track-dur-b">-</span></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Controls Section -->
+            <section class="controls-section">
+                <div class="controls-grid">
+                    <div class="control-group">
+                        <label for="strategy-select">Strategy</label>
+                        <select id="strategy-select">
+                            <option value="optimized">Optimized</option>
+                            <option value="rhythmic">Rhythmic</option>
+                            <option value="atmospheric">Atmospheric</option>
+                            <option value="stem-level">Stem Level</option>
+                            <option value="conservative">Conservative</option>
+                            <option value="crossfade">Crossfade</option>
+                        </select>
+                    </div>
+
+                    <div class="control-group">
+                        <label for="transition-duration">Transition Duration (s)</label>
+                        <input type="range" id="transition-duration" min="2" max="32" step="0.5" value="8">
+                        <span class="range-value" id="duration-value">8.0s</span>
+                    </div>
+
+                    <div class="control-group">
+                        <button class="btn-primary btn-generate" id="generate-btn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                                <path d="M2 17l10 5 10-5"/>
+                                <path d="M2 12l10 5 10-5"/>
+                            </svg>
+                            <span>Generate Transition</span>
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Visualizer Section -->
+            <section class="visualizer-section">
+                <div class="visualizer-header">
+                    <h2>Transition Visualizer</h2>
+                    <div class="visualizer-controls">
+                        <button class="btn-icon" id="play-btn" title="Play/Pause">
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                                <polygon points="5 3 19 12 5 21"/>
+                            </svg>
+                        </button>
+                        <button class="btn-icon" id="stop-btn" title="Stop">
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                                <rect x="6" y="4" width="4" height="16"/>
+                                <rect x="14" y="4" width="4" height="16"/>
+                            </svg>
+                        </button>
+                        <div class="time-display" id="time-display">0:00 / 0:00</div>
+                        <input type="range" id="scrubber" min="0" max="100" value="0" step="0.1">
+                    </div>
+                </div>
+
+                <div class="visualizer-container">
+                    <canvas id="visualizer-canvas"></canvas>
+                </div>
+
+                <div class="comparison-controls">
+                    <label class="switch-label">
+                        <input type="checkbox" id="compare-toggle" checked>
+                        <span class="switch-slider"></span>
+                        <span>Compare: DCP Mix vs Crossfade</span>
+                    </label>
+                </div>
+
+                <div class="download-section">
+                    <a href="#" class="btn-secondary" id="download-btn" download>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="7 10 12 15 17 10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                        <span>Download Master Mix (.wav)</span>
+                    </a>
+                </div>
+            </section>
+
+            <!-- Info Panel -->
+            <section class="info-panel" id="info-panel">
+                <h3>Transition Details</h3>
+                <div class="info-grid" id="transition-details"></div>
+            </section>
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

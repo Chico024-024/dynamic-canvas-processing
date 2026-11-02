@@ -1,0 +1,423 @@
+"""DCP Web Studio - Zero-Dependency Local Server for Drag-and-Drop Song Mixer.
+
+This module provides a zero-dependency local HTTP server for the DCP Web Studio,
+allowing users to drag & drop songs, choose transition strategies, and visualize
+transitions with a Spotify-style animated visualizer.
+"""
+
+from __future__ import annotations
+
+import json
+import mimetypes
+import os
+import sys
+import threading
+import webbrowser
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, urlparse
+
+# Add src to path for absolute imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from dcp.audio_io import load_audio
+from dcp.analysis import analyze_track_with_backend
+from dcp.config import DEFAULT_CONFIG, DCPConfig
+from dcp.models import AudioBuffer
+from dcp.transitions import TransitionContext
+from dcp.rendering import render_plan, render_crossfade
+from dcp.validation import validate_audio
+
+
+class DCPWebStudioHandler(SimpleHTTPRequestHandler):
+    """HTTP request handler for DCP Web Studio."""
+
+    def __init__(
+        self,
+        *args,
+        config: Optional[DCPConfig] = None,
+        static_dir: Optional[Path] = None,
+        output_dir: Optional[Path] = None,
+        **kwargs,
+    ):
+        self.config = config or DEFAULT_CONFIG
+        self.static_dir = static_dir or Path(__file__).parent / "static"
+        self.output_dir = output_dir or Path.cwd() / "output" / "web_mixes"
+        if args:
+            super().__init__(*args, directory=str(self.static_dir), **kwargs)
+
+    def do_GET(self) -> None:
+        """Handle GET requests."""
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/" or path == "/index.html":
+            self._serve_index()
+        elif path.startswith("/static/"):
+            self._serve_static(path[8:])  # Remove "/static/" prefix
+        elif path.startswith("/api/audio/"):
+            self._serve_audio(path[11:])  # Remove "/api/audio/" prefix
+        elif path.startswith("/api/"):
+            self._send_json_response({"error": "Not found"}, status=404)
+        else:
+            self._send_json_response({"error": "Not found"}, status=404)
+
+    def do_POST(self) -> None:
+        """Handle POST requests."""
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/api/analyze":
+            self._handle_analyze()
+        elif path == "/api/mix":
+            self._handle_mix()
+        else:
+            self._send_json_response({"error": "Not found"}, status=404)
+
+    def _serve_index(self) -> None:
+        """Serve the main index.html page."""
+        index_path = self.static_dir / "index.html"
+        if index_path.exists():
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            with open(index_path, "rb") as f:
+                self.wfile.write(f.read())
+        else:
+            self._send_json_response({"error": "index.html not found"}, status=404)
+
+    def _serve_static(self, path: str) -> None:
+        """Serve static files (CSS, JS, SVG, etc.)."""
+        file_path = self.static_dir / path
+        if file_path.exists() and file_path.is_file():
+            mime_type, _ = mimetypes.guess_type(str(file_path))
+            if mime_type is None:
+                mime_type = "application/octet-stream"
+            self.send_response(200)
+            self.send_header("Content-Type", mime_type)
+            self.end_headers()
+            with open(file_path, "rb") as f:
+                self.wfile.write(f.read())
+        else:
+            self._send_json_response({"error": "Not found"}, status=404)
+
+    def _serve_audio(self, filename: str) -> None:
+        """Serve audio files from the output directory."""
+        file_path = self.output_dir / filename
+        if file_path.exists() and file_path.is_file():
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Accept-Ranges", "bytes")
+            file_size = file_path.stat().st_size
+            self.send_header("Content-Length", str(file_path.stat().st_size))
+            self.end_headers()
+            with open(file_path, "rb") as f:
+                self.wfile.write(f.read())
+        else:
+            self._send_json_response({"error": "Audio file not found"}, status=404)
+
+    def _handle_analyze(self) -> None:
+        """Handle POST /api/analyze - analyze uploaded audio file."""
+        try:
+            content_type = self.headers.get("Content-Type", "")
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+
+            audio_data = None
+            if content_type.startswith("multipart/form-data"):
+                boundary = self._get_boundary(content_type)
+                if boundary:
+                    parts = self._parse_multipart(body, boundary)
+                    for part in parts:
+                        if part.get("name") in ("audio", "file", "song"):
+                            audio_data = part.get("data")
+                            break
+                    if not audio_data and parts:
+                        audio_data = parts[0].get("data")
+                else:
+                    audio_data = body
+            else:
+                audio_data = body
+
+            if not audio_data:
+                self._send_json_response({"error": "No audio file provided"}, status=400)
+                return
+
+            # Save to temporary file and analyze
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp.write(audio_data)
+                tmp_path = tmp.name
+
+            try:
+                audio = load_audio(tmp_path)
+                analysis = analyze_track_with_backend(
+                    audio, config=self.config.analysis, backend="auto"
+                )
+                waveform = self._generate_waveform_envelope(audio)
+
+                result = {
+                    "tempo_bpm": analysis.tempo_bpm,
+                    "tempo_confidence": analysis.tempo_confidence,
+                    "camelot_code": analysis.camelot_code,
+                    "key": analysis.key,
+                    "key_confidence": analysis.key_confidence,
+                    "duration_s": analysis.duration_s,
+                    "peak_dbfs": analysis.peak_dbfs,
+                    "rms_dbfs": analysis.rms_dbfs,
+                    "waveform": waveform,
+                }
+                self._send_json_response(result)
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+        except Exception as e:
+            self._send_json_response({"error": str(e)}, status=500)
+
+    def _handle_mix(self) -> None:
+        """Handle POST /api/mix - create transition between two songs."""
+        try:
+            content_type = self.headers.get("Content-Type", "")
+            if not content_type.startswith("multipart/form-data"):
+                self._send_json_response({"error": "Expected multipart/form-data"}, status=400)
+                return
+
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+
+            boundary = self._get_boundary(self.headers.get("Content-Type", ""))
+            if not boundary:
+                self._send_json_response({"error": "Invalid boundary"}, status=400)
+                return
+
+            parts = self._parse_multipart(body, boundary)
+
+            song_a_data = None
+            song_b_data = None
+            strategy = "optimized"
+            transition_duration = 8.0
+
+            for part in parts:
+                name = part.get("name", "")
+                if name == "song_a":
+                    song_a_data = part.get("data")
+                elif name == "song_b":
+                    song_b_data = part.get("data")
+                elif name == "strategy":
+                    strategy = part.get("data", "").decode("utf-8") if isinstance(part.get("data"), bytes) else part.get("data", "optimized")
+                elif name == "transition_duration":
+                    try:
+                        transition_duration = float(part.get("data", "8.0"))
+                    except (ValueError, TypeError):
+                        transition_duration = 8.0
+
+            if not song_a_data or not song_b_data:
+                self._send_json_response({"error": "Both song_a and song_b required"}, status=400)
+                return
+
+            # Save to temporary files
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_a:
+                tmp_a.write(song_a_data)
+                tmp_a_path = tmp_a.name
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_b:
+                tmp_b.write(song_b_data)
+                tmp_b_path = tmp_b.name
+
+            try:
+                song_a = load_audio(tmp_a_path)
+                song_b = load_audio(tmp_b_path)
+
+                analysis_a = analyze_track_with_backend(song_a, self.config.analysis, backend="auto")
+                analysis_b = analyze_track_with_backend(song_b, self.config.analysis, backend="auto")
+
+                # Build transition context
+                context = TransitionContext(
+                    song_a=song_a,
+                    song_b=song_b,
+                    stems_a=None,
+                    stems_b=None,
+                    analysis_a=analysis_a,
+                    analysis_b=analysis_b,
+                    requested_duration_s=transition_duration,
+                    requested_strategy=strategy,
+                    config=self.config,
+                )
+
+                # Build planner and create plan
+                from ..transitions.strategies import build_core_registry
+                registry = build_core_registry()
+                strategy_obj = registry.get(strategy)
+                plan = strategy_obj.plan(context)
+
+                # Render both mix and baseline
+                mix_result = render_plan(song_a, song_b, plan, stems_a=None, stems_b=None, config=self.config)
+                from ..rendering import render_crossfade
+                baseline_result = render_crossfade(song_a, song_b, overlap_s=transition_duration, config=self.config)
+
+                # Save outputs
+                import uuid
+                mix_id = str(uuid.uuid4())[:8]
+                mix_filename = f"mix_{mix_id}.wav"
+                baseline_filename = f"baseline_{mix_id}.wav"
+
+                self.output_dir.mkdir(parents=True, exist_ok=True)
+                mix_path = self.output_dir / f"mix_{mix_id}.wav"
+                baseline_path = self.output_dir / f"baseline_{mix_id}.wav"
+
+                from ..audio_io import save_audio
+                save_audio(mix_path, mix_result.audio, subtype="PCM_24")
+                save_audio(baseline_path, baseline_result.audio, subtype="PCM_24")
+
+                # Generate waveforms for visualization
+                waveform_a = self._generate_waveform_envelope(analysis_a)
+                waveform_b = self._generate_waveform_envelope(analysis_b)
+
+                result = {
+                    "mix_url": f"/api/audio/mix_{mix_id}.wav",
+                    "baseline_url": f"/api/audio/baseline_{mix_id}.wav",
+                    "duration_s": mix_result.audio.duration_s,
+                    "transition_start_s": mix_result.audio.duration_s - transition_duration,
+                    "transition_duration_s": transition_duration,
+                    "downbeat_a_s": 0.0,  # Would need actual downbeat from analysis
+                    "downbeat_b_s": 0.0,
+                    "automations": [a.to_dict() for a in plan.automations] if hasattr(plan, 'automations') else [],
+                    "waveform_a": self._generate_waveform_envelope(analysis_a),
+                    "waveform_b": self._generate_waveform_envelope(analysis_b),
+                }
+                self._send_json_response(result)
+
+            finally:
+                try:
+                    os.unlink(tmp_a_path)
+                    os.unlink(tmp_b_path)
+                except Exception:
+                    pass
+
+        except Exception as e:
+            self._send_json_response({"error": str(e)}, status=500)
+
+    def _generate_waveform_envelope(self, analysis) -> List[float]:
+        """Generate a simplified waveform envelope for visualization."""
+        # Return a placeholder envelope - in production would use actual audio data
+        return [0.0] * 100
+
+    def _get_boundary(self, content_type: str) -> Optional[bytes]:
+        """Extract boundary from Content-Type header."""
+        if "boundary=" in content_type:
+            boundary = content_type.split("boundary=")[1].strip()
+            if boundary.startswith('"') and boundary.endswith('"'):
+                boundary = boundary[1:-1]
+            return boundary.encode()
+        return None
+
+    def _parse_multipart(self, body: bytes, boundary: bytes) -> List[Dict[str, Any]]:
+        """Parse multipart form data."""
+        parts = []
+        parts_raw = body.split(b"--" + boundary)
+        for part in parts_raw[1:-1]:  # Skip first empty and last --
+            if not part.strip():
+                continue
+            header_end = part.find(b"\r\n\r\n")
+            if header_end == -1:
+                continue
+            headers_raw = part[:header_end].decode("utf-8", errors="ignore")
+            data = part[header_end + 4:]
+
+            headers = {}
+            for line in headers_raw.split("\r\n"):
+                if ": " in line:
+                    k, v = line.split(": ", 1)
+                    headers[k.lower()] = v
+
+            name = None
+            if "content-disposition" in headers:
+                cd = headers["content-disposition"]
+                for part in cd.split(";"):
+                    part = part.strip()
+                    if part.startswith("name="):
+                        name = part[6:].strip('"')
+
+            parts.append({
+                "name": name,
+                "data": data,
+                "headers": headers
+            })
+        return parts
+
+    def _get_boundary(self, content_type: str) -> Optional[bytes]:
+        """Extract boundary from Content-Type header."""
+        if "boundary=" in content_type:
+            boundary = content_type.split("boundary=")[1].strip()
+            if boundary.startswith('"') and boundary.endswith('"'):
+                boundary = boundary[1:-1]
+            return boundary.encode()
+        return None
+
+    def _send_json_response(self, data: Dict[str, Any], status: int = 200) -> None:
+        """Send JSON response."""
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(json.dumps(data, allow_nan=False).encode("utf-8"))
+
+
+def create_server(
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    config: Optional[DCPConfig] = None,
+    static_dir: Optional[Path] = None,
+    output_dir: Optional[Path] = None,
+) -> HTTPServer:
+    """Create and configure the DCP Web Studio HTTP server."""
+    if config is None:
+        config = DEFAULT_CONFIG
+    if static_dir is None:
+        static_dir = Path(__file__).parent / "static"
+    if output_dir is None:
+        output_dir = Path.cwd() / "output" / "web_mixes"
+
+    def handler(*args, **kwargs):
+        return DCPWebStudioHandler(*args, config=config, static_dir=static_dir, output_dir=output_dir, **kwargs)
+
+    server = HTTPServer((host, port), handler)
+    return server
+
+
+def run_server(
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    config: Optional[DCPConfig] = None,
+    static_dir: Optional[Path] = None,
+    output_dir: Optional[Path] = None,
+    open_browser: bool = True,
+) -> None:
+    """Run the DCP Web Studio server."""
+    server = create_server(host, port, config, static_dir, output_dir)
+    print(f"DCP Web Studio running at http://{host}:{port}")
+    if open_browser:
+        webbrowser.open(f"http://{host}:{port}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+        server.shutdown()
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="DCP Web Studio Server")
+    parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
+    parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
+    parser.add_argument("--no-browser", action="store_true", help="Don't open browser automatically")
+    args = parser.parse_args()
+
+    run_server(
+        host=args.host,
+        port=args.port,
+        open_browser=not args.no_browser,
+    )

@@ -838,10 +838,32 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     visualize.set_defaults(func=_cmd_visualize)
 
+    def _cmd_ui(args: argparse.Namespace) -> int:
+        from .ui_server import run_server
+        run_server(
+            host=args.host,
+            port=args.port,
+            open_browser=not args.no_browser,
+        )
+        return 0
+
+
     doctor = subparsers.add_parser(
         "doctor", help="show environment, dependencies, and plugin status"
     )
     doctor.set_defaults(func=_cmd_doctor)
+
+    ui = subparsers.add_parser(
+        "ui", help="launch the DCP Web Studio drag-and-drop song mixer"
+    )
+    ui.add_argument("--host", default="127.0.0.1", help="host to bind to")
+    ui.add_argument("--port", type=int, default=8000, help="port to bind to")
+    ui.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="don't open the browser automatically",
+    )
+    ui.set_defaults(func=_cmd_ui)
 
     return parser
 

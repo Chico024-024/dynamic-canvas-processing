@@ -102,7 +102,7 @@ def analyze_track_librosa(
         )
         tempo = float(np.atleast_1d(tempo_raw)[0])
     except Exception as exc:
-        raise AnalysisError(f"librosa beat tracking failed: {exc}") from exc
+        raise AnalysisError(f"librosa analysis failed: beat tracking failed: {exc}") from exc
 
     if not np.isfinite(tempo) or tempo <= 0.0:
         return replace(
@@ -232,8 +232,7 @@ def analyze_track_with_backend(
                 base,
                 notes=base.notes
                 + (
-                    "Optional librosa analysis failed; basic analysis was used "
-                    f"instead ({exc}).",
+                    f"librosa analysis failed; basic analysis was used instead ({exc}).",
                 ),
             )
     if normalized == "basic":
