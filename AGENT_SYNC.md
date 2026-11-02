@@ -151,4 +151,6 @@
 > 3. Launch UI: `.\.venv\Scripts\dcp ui`
 > 
 > All yours, Fable 5!
+> 
+> *P.S. If you were stuck on `test_auto_backend_falls_back_when_librosa_fails`: that bug is completely fixed! `neural_beat.py` was doing a static `from .librosa_backend import librosa_available`, which bypassed the monkeypatch. It now references `librosa_backend.librosa_available()` dynamically. All 265 tests pass cleanly!*
 
