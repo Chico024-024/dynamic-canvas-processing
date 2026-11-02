@@ -99,10 +99,11 @@ From the project directory:
 
 ```bash
 uv venv .venv --python 3.12
-uv pip install --python .venv/Scripts/python.exe -e ".[dev]"
+# Note: Use --link-mode copy if your project is inside OneDrive or a cloud-synced folder
+uv pip install --link-mode copy --python .venv/Scripts/python.exe -e ".[dev]"
 
 # Optional beat tracking and secondary tempo estimate
-uv pip install --python .venv/Scripts/python.exe -e ".[dev,analysis]"
+uv pip install --link-mode copy --python .venv/Scripts/python.exe -e ".[dev,analysis]"
 ```
 
 ### Standard virtual environment
