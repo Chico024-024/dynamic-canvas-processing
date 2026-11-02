@@ -17,7 +17,12 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 
 
-_TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
+try:
+    import torch
+    _TORCH_AVAILABLE = True
+except (ImportError, OSError):
+    torch = None  # type: ignore
+    _TORCH_AVAILABLE = False
 
 
 # Model definitions with download URLs and expected SHA256 hashes

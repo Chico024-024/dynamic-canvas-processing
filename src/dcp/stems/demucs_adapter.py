@@ -47,10 +47,12 @@ _DEFAULT_CACHE_DIR = ".dcp_cache/stems"
 
 def demucs_available() -> bool:
     """Return whether demucs and torch can be imported."""
-    return (
-        importlib.util.find_spec("demucs") is not None
-        and importlib.util.find_spec("torch") is not None
-    )
+    try:
+        import demucs
+        import torch
+        return True
+    except (ImportError, OSError):
+        return False
 
 
 def _content_hash(audio: AudioBuffer) -> str:

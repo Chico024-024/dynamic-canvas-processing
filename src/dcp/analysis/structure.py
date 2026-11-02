@@ -31,8 +31,19 @@ _INSTALL_HINT = (
     "Model weights will be downloaded on first use to ~/.dcp/models/"
 )
 
-_TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
-_TORCHAUDIO_AVAILABLE = importlib.util.find_spec("torchaudio") is not None
+try:
+    import torch
+    _TORCH_AVAILABLE = True
+except (ImportError, OSError):
+    torch = None  # type: ignore
+    _TORCH_AVAILABLE = False
+
+try:
+    import torchaudio
+    _TORCHAUDIO_AVAILABLE = True
+except (ImportError, OSError):
+    torchaudio = None  # type: ignore
+    _TORCHAUDIO_AVAILABLE = False
 
 
 def neural_structure_available() -> bool:
@@ -63,8 +74,7 @@ SECTION_COLORS = {
 
 
 # Only define the model class if torch is available
-if _TORCH_AVAILABLE:
-    import torch
+if _TORCH_AVAILABLE and torch is not None:
 
     class StructureSegmenterNet(torch.nn.Module):
         """BiLSTM/Transformer-based structure segmenter.

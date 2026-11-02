@@ -27,9 +27,16 @@ from .plan import TransitionParams
 
 if TYPE_CHECKING:
     import torch
+try:
+    import torch
     import torch.nn as nn
-
-_TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
+    import torch.nn.functional as F
+    _TORCH_AVAILABLE = True
+except (ImportError, OSError):
+    torch = None  # type: ignore
+    nn = None  # type: ignore
+    F = None  # type: ignore
+    _TORCH_AVAILABLE = False
 
 
 def neural_policy_available() -> bool:
@@ -38,10 +45,7 @@ def neural_policy_available() -> bool:
 
 
 # Only define PyTorch classes if torch is available
-if _TORCH_AVAILABLE:
-    import torch
-    import torch.nn as nn
-    import torch.nn.functional as F
+if _TORCH_AVAILABLE and torch is not None:
 
     class FeatureEncoder(nn.Module):
         """Encodes TrackAnalysis features into a fixed-dimensional vector."""
