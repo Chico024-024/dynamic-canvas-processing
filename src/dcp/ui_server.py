@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import re
 import sys
 import threading
 import webbrowser
@@ -233,13 +234,20 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
 
             if strategy == "studio_remix":
                 # Studio Remix computes exact bar-aligned duration autonomously from musical analysis
-                transition_duration = 0.0
+                # Use a generous fallback for trimming/baseline; the strategy ignores this value
+                transition_duration = 32.0
+                user_specified_duration = False
 
-            if not song_a_data or not song_b_data:
+            if not song_a_data and not song_b_data:
                 self._send_json_response({"error": "Both song_a and song_b required"}, status=400)
                 return
+            if not song_a_data:
+                self._send_json_response({"error": "Song A is required (missing song_a payload)"}, status=400)
+                return
+            if not song_b_data:
+                self._send_json_response({"error": "Song B is required (missing song_b payload)"}, status=400)
+                return
 
-            # Save to temporary files
             import tempfile
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_a:
                 tmp_a.write(song_a_data)
@@ -416,46 +424,56 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
         """Extract boundary from Content-Type header."""
         if "boundary=" in content_type:
             boundary = content_type.split("boundary=")[1].strip()
+            if ";" in boundary:
+                boundary = boundary.split(";")[0].strip()
             if boundary.startswith('"') and boundary.endswith('"'):
                 boundary = boundary[1:-1]
-            return boundary.encode()
+            return boundary.encode("utf-8")
         return None
 
     def _parse_multipart(self, body: bytes, boundary: bytes) -> List[Dict[str, Any]]:
         """Parse multipart form data."""
         parts = []
-        parts_raw = body.split(b"--" + boundary)
-        for part in parts_raw[1:-1]:  # Skip first empty and last --
-            if not part.strip():
+        delimiter = b"--" + boundary
+        raw_chunks = body.split(delimiter)
+        for chunk in raw_chunks:
+            chunk = chunk.strip()
+            if not chunk or chunk == b"--" or chunk.startswith(b"--"):
                 continue
-            header_end = part.find(b"\r\n\r\n")
+
+            # Locate header end (\r\n\r\n or \n\n)
+            header_end = chunk.find(b"\r\n\r\n")
+            header_sep_len = 4
+            if header_end == -1:
+                header_end = chunk.find(b"\n\n")
+                header_sep_len = 2
             if header_end == -1:
                 continue
-            headers_raw = part[:header_end].decode("utf-8", errors="ignore")
-            data = part[header_end + 4:]
+
+            headers_raw = chunk[:header_end].decode("utf-8", errors="ignore")
+            data = chunk[header_end + header_sep_len:]
             if data.endswith(b"\r\n"):
                 data = data[:-2]
             elif data.endswith(b"\n"):
                 data = data[:-1]
 
             headers = {}
-            for line in headers_raw.split("\r\n"):
-                if ": " in line:
-                    k, v = line.split(": ", 1)
-                    headers[k.lower()] = v
+            for line in re.split(r"\r?\n", headers_raw):
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    headers[k.strip().lower()] = v.strip()
 
             name = None
             if "content-disposition" in headers:
                 cd = headers["content-disposition"]
-                for part in cd.split(";"):
-                    part = part.strip()
-                    if part.startswith("name="):
-                        name = part[6:].strip('"')
+                m = re.search(r'name=["\']?([^"\';\r\n]+)["\']?', cd, re.IGNORECASE)
+                if m:
+                    name = m.group(1).strip('"\' ')
 
             parts.append({
                 "name": name,
                 "data": data,
-                "headers": headers
+                "headers": headers,
             })
         return parts
 

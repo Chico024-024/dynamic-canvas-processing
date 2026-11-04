@@ -109,26 +109,43 @@
         // Drag and drop
         setupDragAndDrop();
 
-        // Strategy selection
-        document.getElementById('strategy-select').addEventListener('change', (e) => {
-            const isRemix = e.target.value === 'studio_remix';
+        // Strategy selection UI synchronizer
+        function updateStrategyUI(strategy) {
+            const isRemix = strategy === 'studio_remix';
+            const sliderContainer = document.getElementById('duration-slider-container');
+            const badge = document.getElementById('autonomous-duration-badge');
+            const durationLabel = document.getElementById('duration-label');
             const durationInput = document.getElementById('transition-duration');
             const durationVal = document.getElementById('duration-value');
+
             if (isRemix) {
-                durationInput.disabled = true;
-                durationInput.dataset.previousValue = durationInput.value;
-                durationVal.textContent = "Autonomous (AI Decides)";
-                durationVal.style.color = "var(--color-accent-amber)";
+                if (sliderContainer) sliderContainer.style.display = 'none';
+                if (badge) badge.style.display = 'flex';
+                if (durationLabel) durationLabel.textContent = 'Bridge Duration';
+                if (durationInput) durationInput.disabled = true;
             } else {
-                durationInput.disabled = false;
-                durationVal.style.color = "";
-                durationVal.textContent = `${parseFloat(durationInput.value).toFixed(1)}s`;
+                if (sliderContainer) sliderContainer.style.display = 'flex';
+                if (badge) badge.style.display = 'none';
+                if (durationLabel) durationLabel.textContent = 'Transition Duration (s)';
+                if (durationInput) {
+                    durationInput.disabled = false;
+                    if (durationVal) durationVal.textContent = `${parseFloat(durationInput.value).toFixed(1)}s`;
+                }
             }
+        }
+
+        // Initialize strategy UI immediately on page load
+        updateStrategyUI(document.getElementById('strategy-select').value);
+
+        // Strategy selection change handler
+        document.getElementById('strategy-select').addEventListener('change', (e) => {
+            updateStrategyUI(e.target.value);
         });
 
-        // Transition duration
+        // Transition duration input handler
         document.getElementById('transition-duration').addEventListener('input', (e) => {
-            document.getElementById('duration-value').textContent = `${parseFloat(e.target.value).toFixed(1)}s`;
+            const durationVal = document.getElementById('duration-value');
+            if (durationVal) durationVal.textContent = `${parseFloat(e.target.value).toFixed(1)}s`;
         });
 
         // Generate button
@@ -136,9 +153,17 @@
 
         // Generate transition handler
         async function handleGenerate() {
-            // Validate both tracks are loaded
-            if (!state.tracks.a.file || !state.tracks.b.file) {
+            // Validate both tracks are loaded with deck-specific guidance
+            if (!state.tracks.a.file && !state.tracks.b.file) {
                 alert('Please load both Song A and Song B before generating a transition.');
+                return;
+            }
+            if (!state.tracks.a.file) {
+                alert('Deck A is empty! Please load Song A into Deck A before generating a transition.');
+                return;
+            }
+            if (!state.tracks.b.file) {
+                alert('Deck B is empty! Please load Song B into Deck B before generating a transition.');
                 return;
             }
 
@@ -150,7 +175,7 @@
             const generateBtn = document.getElementById('generate-btn');
             const originalBtnText = generateBtn.innerHTML;
             generateBtn.disabled = true;
-            generateBtn.innerHTML = '<div class="loading-spinner"></div><span>Generating...</span>';
+            generateBtn.innerHTML = '<div class="loading-spinner"></div><span>Composing Song C...</span>';
 
             try {
                 // Prepare form data
@@ -270,54 +295,67 @@
         window.addEventListener('resize', handleResize);
     }
 
+    function isAudioFile(file) {
+        if (!file) return false;
+        if (file.type && file.type.startsWith('audio/')) return true;
+        return /\.(wav|mp3|flac|ogg|m4a|aac|aiff|wma)$/i.test(file.name || '');
+    }
+
     function setupDragAndDrop() {
         ['a', 'b'].forEach(deck => {
             const zone = document.getElementById(`drop-zone-${deck}`);
 
             ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(event => {
-                document.getElementById(`drop-zone-${deck}`).addEventListener(event, (e) => {
+                zone.addEventListener(event, (e) => {
                     e.preventDefault();
                     e.stopPropagation();
                 }, false);
             });
 
-            document.getElementById(`drop-zone-${deck}`).addEventListener('dragenter', (e) => {
-                e.target.closest('.drop-zone').classList.add('drag-active');
+            zone.addEventListener('dragenter', (e) => {
+                zone.classList.add('drag-active');
             });
 
-            document.getElementById(`drop-zone-${deck}`).addEventListener('dragleave', (e) => {
-                if (!e.currentTarget.contains(e.relatedTarget)) {
-                    e.target.closest('.drop-zone').classList.remove('drag-active');
+            zone.addEventListener('dragleave', (e) => {
+                if (!zone.contains(e.relatedTarget)) {
+                    zone.classList.remove('drag-active');
                 }
             });
 
-            document.getElementById(`drop-zone-${deck}`).addEventListener('drop', (e) => {
+            zone.addEventListener('drop', (e) => {
                 e.preventDefault();
-                e.target.closest('.drop-zone').classList.remove('drag-active');
+                zone.classList.remove('drag-active');
 
                 const file = e.dataTransfer.files[0];
-                if (file && file.type.startsWith('audio/')) {
+                if (isAudioFile(file)) {
                     handleFileUpload(file, deck);
+                } else if (file) {
+                    alert('Please drop an audio file (.wav, .mp3, .flac, .ogg, .m4a)');
                 }
             });
 
             // Click to upload
-            document.getElementById(`drop-zone-${deck}`).addEventListener('click', () => {
+            zone.addEventListener('click', () => {
                 createFileInput(deck).click();
             });
         });
     }
 
     function createFileInput(deck) {
-        const input = document.createElement('input');
-        input.type = 'file';
-        input.accept = 'audio/*';
-        input.style.display = 'none';
-        input.addEventListener('change', (e) => {
+        let input = document.getElementById(`file-input-${deck}`);
+        if (!input) {
+            input = document.createElement('input');
+            input.id = `file-input-${deck}`;
+            input.type = 'file';
+            input.accept = 'audio/*,.wav,.mp3,.flac,.ogg,.m4a,.aac,.aiff';
+            input.style.display = 'none';
+            document.body.appendChild(input);
+        }
+        input.value = '';
+        input.onchange = (e) => {
             const file = e.target.files[0];
             if (file) handleFileUpload(file, deck);
-        });
-        document.body.appendChild(input);
+        };
         return input;
     }
 
@@ -327,8 +365,9 @@
 
         // Show loading state
         const zone = document.getElementById(`drop-zone-${deck}`);
+        zone.classList.remove('has-file');
         zone.classList.add('loading');
-        zone.innerHTML = '<div class="loading-spinner"></div><p>Analyzing...</p>';
+        zone.innerHTML = '<div class="loading-spinner"></div><p>Analyzing audio...</p>';
 
         // Create object URL for preview
         track.objectUrl = URL.createObjectURL(file);
@@ -342,8 +381,9 @@
             // Update UI
             updateTrackInfo(deck, file, analysis);
             document.getElementById(`track-info-${deck}`).style.display = 'block';
-            document.getElementById(`drop-zone-${deck}`).classList.add('has-file');
-            document.getElementById(`drop-zone-${deck}`).innerHTML = `
+            zone.classList.remove('loading');
+            zone.classList.add('has-file');
+            zone.innerHTML = `
                 <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
                     <polyline points="14 2 14 8 20 8"/>
@@ -352,9 +392,18 @@
                 <p class="file-size">${formatFileSize(file.size)}</p>
             `;
         }).catch(err => {
-            console.error('Analysis failed:', err);
-            alert('Failed to analyze audio file: ' + err.message);
-            document.getElementById(`drop-zone-${deck}`).classList.remove('has-file');
+            console.error('Quick analysis warning:', err);
+            // Even if quick analysis fails, preserve the audio file so generation can decompose and process it
+            zone.classList.remove('loading');
+            zone.classList.add('has-file');
+            zone.innerHTML = `
+                <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                    <polyline points="14 2 14 8 20 8"/>
+                </svg>
+                <p class="file-name">${file.name}</p>
+                <p class="file-size">${formatFileSize(file.size)}</p>
+            `;
         });
     }
 

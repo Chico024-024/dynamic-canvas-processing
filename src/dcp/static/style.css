@@ -420,6 +420,25 @@ input[type="range"]::-moz-range-thumb {
     color: var(--cyan);
 }
 
+.autonomous-badge {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: rgba(251, 191, 36, 0.12);
+    border: 1px solid rgba(251, 191, 36, 0.35);
+    border-radius: var(--radius-sm, 6px);
+    color: #fbbf24;
+    font-size: 0.8rem;
+    font-weight: 500;
+    min-height: 38px;
+    box-sizing: border-box;
+}
+
+.autonomous-badge .badge-icon {
+    font-size: 1.05rem;
+}
+
 /* Buttons */
 .btn-primary,
 .btn-secondary,
