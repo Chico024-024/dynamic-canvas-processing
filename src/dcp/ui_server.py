@@ -282,9 +282,21 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                 stems_a = None
                 stems_b = None
                 if strategy == "studio_remix":
-                    from .stems.dsp_splitter import decompose_audio_to_stemset
-                    stems_a = decompose_audio_to_stemset(song_a, label="A")
-                    stems_b = decompose_audio_to_stemset(song_b, label="B")
+                    from .stems.demucs_adapter import demucs_available, DemucsAdapter
+                    if demucs_available():
+                        try:
+                            separator = DemucsAdapter()
+                            stems_a = separator.separate(song_a)
+                            stems_b = separator.separate(song_b)
+                        except Exception as e:
+                            # Fallback if Demucs run fails
+                            from .stems.dsp_splitter import decompose_audio_to_stemset
+                            stems_a = decompose_audio_to_stemset(song_a, label="A")
+                            stems_b = decompose_audio_to_stemset(song_b, label="B")
+                    else:
+                        from .stems.dsp_splitter import decompose_audio_to_stemset
+                        stems_a = decompose_audio_to_stemset(song_a, label="A")
+                        stems_b = decompose_audio_to_stemset(song_b, label="B")
 
                 # Build transition context
                 context = TransitionContext(
