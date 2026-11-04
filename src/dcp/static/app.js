@@ -31,7 +31,21 @@
         transitionDurationS: 8,
         songADurationS: 0,
         songBDurationS: 0,
-        currentMixId: null
+        currentMixId: null,
+        // Studio Remix (Song C) visual markers
+        studioRemix: {
+            launchpadS: null,      // T_launch in Song A
+            impactS: null,         // T_impact in Song B
+            breathStartS: null,    // Breath window start
+            breathEndS: null,      // Breath window end
+            bridgeStartS: null,    // Bridge start in Song A
+            bridgeBars: 12,        // Total bridge bars (8 + 4 ghost)
+            phaseLocked: false,
+            lowEndMonogamy: false,
+            zdfSweeps: false,
+            ghostResolution: false,
+            sidechainDucking: false,
+        }
     };
 
     // DOM Elements
@@ -162,6 +176,25 @@
                 // Update visualizer data
                 if (result.waveform_a) state.visualizerData.mix = result.waveform_a;
                 if (result.waveform_b) state.visualizerData.baseline = result.waveform_b;
+
+                // Extract Studio Remix metadata if available
+                if (result.metadata && result.metadata.studio_remix) {
+                    const meta = result.metadata;
+                    state.studioRemix = {
+                        launchpadS: meta.launchpad_a_s || null,
+                        impactS: meta.impact_b_s || null,
+                        breathStartS: meta.breath_start_s || null,
+                        breathEndS: meta.breath_end_s || null,
+                        bridgeStartS: meta.bridge_start_a_s || null,
+                        bridgeBars: meta.total_bridge_bars || 12,
+                        phaseLocked: meta.phase_locked || false,
+                        lowEndMonogamy: meta.low_end_monogamy || false,
+                        zdfSweeps: meta.zdf_filter_sweeps || false,
+                        ghostResolution: meta.ghost_resolution || false,
+                        sidechainDucking: meta.sidechain_ducking || false,
+                    };
+                    console.log('Studio Remix anchors loaded:', state.studioRemix);
+                }
 
                 // Update visualizer
                 handleResize(); // Re-render with new data
@@ -643,6 +676,286 @@
 
         // Draw playhead
         drawPlayhead(ctx);
+
+        // Draw Studio Remix visual markers if available
+        drawStudioRemixMarkers(ctx, width, height, duration);
+    }
+
+    function drawStudioRemixMarkers(ctx, width, height, duration) {
+        const sr = state.studioRemix;
+        if (!sr || !sr.phaseLocked) return;
+
+        // Helper to convert time to x position
+        const timeToX = (timeS) => (timeS / duration) * width;
+
+        // Draw Launchpad marker (Song A)
+        if (sr.launchpadS !== null) {
+            const x = timeToX(sr.launchpadS);
+            drawVerticalMarker(ctx, x, height, '#00f5d4', '🚀 LAUNCHPAD', 0);
+        }
+
+        // Draw Impact marker (Song B) - aligned with launchpad
+        if (sr.impactS !== null) {
+            const x = timeToX(sr.impactS);
+            drawVerticalMarker(ctx, x, height, '#ff007f', '💥 IMPACT', height / 2);
+        }
+
+        // Draw Breath Window
+        if (sr.breathStartS !== null && sr.breathEndS !== null) {
+            const startX = timeToX(sr.breathStartS);
+            const endX = timeToX(sr.breathEndS);
+            drawBreathWindow(ctx, startX, endX, height);
+        }
+
+        // Draw Bridge Bars (12-bar grid)
+        if (sr.bridgeStartS !== null && sr.bridgeBars > 0) {
+            drawBridgeBars(ctx, sr.bridgeStartS, sr.bridgeBars, duration, width, height);
+        }
+
+        // Draw Low-End Monogamy indicator
+        if (sr.lowEndMonogamy && sr.launchpadS !== null) {
+            drawLowEndMonogamyIndicator(ctx, sr.launchpadS, duration, width, height);
+        }
+
+        // Draw ZDF Sweep indicator
+        if (sr.zdfSweeps && sr.launchpadS !== null) {
+            drawZDFSweepIndicator(ctx, sr.launchpadS, sr.bridgeBars, duration, width, height);
+        }
+
+        // Draw Ghost Resolution indicator
+        if (sr.ghostResolution && sr.launchpadS !== null) {
+            drawGhostResolutionIndicator(ctx, sr.launchpadS, sr.bridgeBars, duration, width, height);
+        }
+
+        // Draw Sidechain Ducking indicator
+        if (sr.sidechainDucking && sr.impactS !== null) {
+            drawSidechainIndicator(ctx, sr.impactS, duration, width, height);
+        }
+    }
+
+    function drawVerticalMarker(ctx, x, height, color, label, labelYOffset) {
+        ctx.save();
+        // Glowing vertical line
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 8;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, height);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+
+        // Label
+        ctx.fillStyle = color;
+        ctx.font = '10px JetBrains Mono, monospace';
+        ctx.textAlign = 'center';
+        const labelY = labelYOffset === 0 ? 20 : height - 20;
+        ctx.fillText(label, x, labelY);
+        ctx.restore();
+    }
+
+    function drawBreathWindow(ctx, startX, endX, height) {
+        ctx.save();
+        // Semi-transparent breath window
+        const grad = ctx.createLinearGradient(startX, 0, endX, 0);
+        grad.addColorStop(0, 'rgba(167, 139, 250, 0.05)');
+        grad.addColorStop(0.5, 'rgba(0, 245, 212, 0.15)');
+        grad.addColorStop(1, 'rgba(255, 0, 127, 0.05)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(startX, 0, endX - startX, height);
+
+        // Breath window borders
+        ctx.strokeStyle = '#a78bfa';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(startX, 0);
+        ctx.lineTo(startX, height);
+        ctx.moveTo(endX, 0);
+        ctx.lineTo(endX, height);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Label
+        ctx.fillStyle = '#a78bfa';
+        ctx.font = '9px JetBrains Mono, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('🫧 BREATH WINDOW', (startX + endX) / 2, height / 2);
+        ctx.restore();
+    }
+
+    function drawBridgeBars(ctx, bridgeStartS, bridgeBars, duration, width, height) {
+        const startX = (bridgeStartS / duration) * width;
+        const barWidth = (bridgeBars * (duration / bridgeBars) / duration) * width / bridgeBars; // Simplified
+        const totalBridgeWidth = (bridgeBars * (duration / bridgeBars)) / duration * width; // Actually just proportional
+
+        ctx.save();
+        ctx.strokeStyle = 'rgba(167, 139, 250, 0.3)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 6]);
+
+        // Calculate bar duration in seconds
+        const barDurationS = duration / bridgeBars;
+
+        for (let i = 1; i < bridgeBars; i++) {
+            const barTime = bridgeStartS + i * barDurationS;
+            const x = (barTime / duration) * width;
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, height);
+            ctx.stroke();
+        }
+
+        // Highlight bar 4 (end of low-end monogamy) and bar 8 (breath/impact)
+        ctx.strokeStyle = '#a78bfa';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([]);
+
+        // Bar 4 boundary
+        if (bridgeBars >= 4) {
+            const bar4Time = bridgeStartS + 4 * barDurationS;
+            const x = (bar4Time / duration) * width;
+            ctx.beginPath();
+            ctx.moveTo(x, height / 2);
+            ctx.lineTo(x, height);
+            ctx.stroke();
+            ctx.fillStyle = '#a78bfa';
+            ctx.font = '8px JetBrains Mono, monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('BAR 4: Bass Fade End', x, height - 8);
+        }
+
+        // Bar 8 boundary (breath/impact)
+        if (bridgeBars >= 8) {
+            const bar8Time = bridgeStartS + 8 * barDurationS;
+            const x = (bar8Time / duration) * width;
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, height / 2);
+            ctx.stroke();
+            ctx.fillStyle = '#a78bfa';
+            ctx.font = '8px JetBrains Mono, monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('BAR 8: BREATH / IMPACT', x, height / 2 - 8);
+        }
+
+        ctx.restore();
+    }
+
+    function drawLowEndMonogamyIndicator(ctx, launchpadS, duration, width, height) {
+        ctx.save();
+        const x = (launchpadS / duration) * width;
+        const barDurationS = (duration - launchpadS) / 12; // Approximate
+        const bar4Time = launchpadS + 4 * barDurationS;
+        const bar4X = (bar4Time / duration) * width;
+
+        // Draw "Low-End Monogamy" zone on Song A side (bottom half)
+        ctx.fillStyle = 'rgba(167, 139, 250, 0.1)';
+        ctx.fillRect(x, height / 2, bar4X - x, height / 2);
+
+        ctx.fillStyle = '#a78bfa';
+        ctx.font = '9px JetBrains Mono, monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText('🔒 LOW-END MONOGAMY: Song A bass ends, Song B bass begins', x + 4, height * 0.75);
+        ctx.restore();
+    }
+
+    function drawZDFSweepIndicator(ctx, launchpadS, bridgeBars, duration, width, height) {
+        ctx.save();
+        const barDurationS = (duration - launchpadS) / bridgeBars;
+        const sweepStartTime = launchpadS + 4 * barDurationS; // Bar 5
+        const sweepEndTime = launchpadS + 8 * barDurationS;   // Bar 8
+        const startX = (sweepStartTime / duration) * width;
+        const endX = (sweepEndTime / duration) * width;
+
+        // Draw sweep arrow on Song A side
+        ctx.strokeStyle = '#00f5d4';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 3]);
+        ctx.beginPath();
+        ctx.moveTo(startX, height * 0.3);
+        ctx.lineTo(endX, height * 0.2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Arrow head
+        ctx.fillStyle = '#00f5d4';
+        ctx.beginPath();
+        ctx.moveTo(endX, height * 0.2);
+        ctx.lineTo(endX - 8, height * 0.25);
+        ctx.lineTo(endX - 8, height * 0.15);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = '#00f5d4';
+        ctx.font = '9px JetBrains Mono, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('📈 ZDF HPF SWEEP 30→950 Hz', (startX + endX) / 2, height * 0.15);
+        ctx.restore();
+    }
+
+    function drawGhostResolutionIndicator(ctx, launchpadS, bridgeBars, duration, width, height) {
+        ctx.save();
+        const barDurationS = (duration - launchpadS) / bridgeBars;
+        const ghostStartTime = launchpadS + 8 * barDurationS; // Bar 9
+        const ghostEndTime = duration;
+        const startX = (ghostStartTime / duration) * width;
+        const endX = (ghostEndTime / duration) * width;
+
+        // Ghost resolution zone (frozen vocal tail)
+        const grad = ctx.createLinearGradient(startX, 0, endX, 0);
+        grad.addColorStop(0, 'rgba(167, 139, 250, 0.3)');
+        grad.addColorStop(1, 'rgba(167, 139, 250, 0.0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(startX, 0, endX - startX, height);
+
+        // Sparkle particles
+        ctx.fillStyle = '#a78bfa';
+        for (let i = 0; i < 12; i++) {
+            const px = startX + Math.random() * (endX - startX);
+            const py = Math.random() * height;
+            const size = 1 + Math.random() * 2;
+            ctx.beginPath();
+            ctx.arc(px, py, size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        ctx.fillStyle = '#c4b5fd';
+        ctx.font = '9px JetBrains Mono, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('✨ GHOST RESOLUTION: Frozen vocal tail + sidechain duck', (startX + endX) / 2, height * 0.95);
+        ctx.restore();
+    }
+
+    function drawSidechainIndicator(ctx, impactS, duration, width, height) {
+        ctx.save();
+        const x = (impactS / duration) * width;
+
+        // Draw sidechain pumping indicator on Song B side (bottom half)
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 4]);
+
+        // Pump wave
+        ctx.beginPath();
+        const waveWidth = 60;
+        const waveHeight = 15;
+        const centerY = height * 0.75;
+        for (let i = 0; i < 5; i++) {
+            const px = x + i * (waveWidth / 4);
+            const py = centerY + (i % 2 === 0 ? -waveHeight : waveHeight);
+            if (i === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        ctx.fillStyle = '#fbbf24';
+        ctx.font = '9px JetBrains Mono, monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText('🎚 SIDECHAIN: Song B kick ducks Song A vocal tail', x + 4, height * 0.85);
+        ctx.restore();
     }
 
     function drawDeckWaveform(ctx, data, startX, endX, yOffset, laneHeight, color, label) {

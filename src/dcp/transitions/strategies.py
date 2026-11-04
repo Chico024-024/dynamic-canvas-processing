@@ -1087,6 +1087,665 @@ class ConservativeStrategy:
         )
 
 
+class StudioRemixStrategy:
+    """
+    Studio Remix (Song C) Strategy - The Autonomous Studio Producer.
+
+    Implements the 12-bar Producer Matrix from the DCP blueprint:
+    - 8-bar composed bridge + 4-bar ghost resolution
+    - Launchpad (T_launch) in Song A: phrase-aligned, high groove energy, concluding vocal
+    - Impact Downbeat (T_impact) in Song B: the Drop! Max low-end surge, kick crest factor
+    - Breath Window (T_breath): 1-2 beat acoustic vacuum before impact
+    - Low-End Monogamy: No bass collision under 150 Hz
+    - ZDF Filter Sweeps: Bars 5-8, Song A stems sweep 30 Hz → 950 Hz
+    - Ghost Resolution (Bars 9-12): Song A's frozen vocal/synth tail floats over Song B's groove,
+      sidechain-ducked by Song B's kick
+    """
+    name = "studio_remix"
+    description = "Autonomous Studio Producer: 8-to-16-bar composed transition bridge (Song C) with launchpad, breath, impact, and ghost resolution."
+
+    def plan(self, context: TransitionContext) -> TransitionPlan:
+        import numpy as np
+        from .alignment import select_launchpad_and_impact
+        from .musical_ir import build_track_musical_ir
+        from .composer import compose_optimal_bridge
+
+        # Check if stems are available - required for Studio Remix
+        if context.stems_a is None and context.stems_b is None:
+            return _conservative_plan(
+                context,
+                requested_strategy=context.requested_strategy,
+                extra_warnings=[
+                    "Studio Remix requires stems for both songs; "
+                    "conservative fallback used.",
+                ],
+                prefix_reasoning=(
+                    "Studio Remix (Song C) requires stem separation for independent "
+                    "processing of vocals, drums, bass, and other layers. "
+                    "No stems were supplied."
+                ),
+            )
+
+        view_a, view_b, warnings, reasoning = _views(context)
+
+        composed_plan = None
+        anchor_result = None
+        downbeats_a = list(context.analysis_a.downbeat_times_s)
+        downbeats_b = list(context.analysis_b.downbeat_times_s)
+
+        # Attempt Layer 3 Composition Planning if both songs have stems and >= 5 downbeats
+        if len(downbeats_a) >= 5 and len(downbeats_b) >= 5 and context.stems_a and context.stems_b:
+            try:
+                stems_a_raw = {k: v.samples for k, v in context.stems_a.items()}
+                stems_b_raw = {k: v.samples for k, v in context.stems_b.items()}
+                ir_a = build_track_musical_ir(
+                    "song_a",
+                    stems_a_raw,
+                    np.asarray(downbeats_a, dtype=np.float64),
+                    sr=context.song_a.sample_rate,
+                    base_confidence=context.analysis_a.tempo_confidence or 0.85,
+                )
+                ir_b = build_track_musical_ir(
+                    "song_b",
+                    stems_b_raw,
+                    np.asarray(downbeats_b, dtype=np.float64),
+                    sr=context.song_b.sample_rate,
+                    base_confidence=context.analysis_b.tempo_confidence or 0.85,
+                )
+                candidate_plan = compose_optimal_bridge(ir_a, ir_b)
+                if not candidate_plan.is_viable:
+                    return _conservative_plan(
+                        context,
+                        requested_strategy=context.requested_strategy,
+                        extra_warnings=[
+                            f"Studio Remix rejected by Composition Gate: {candidate_plan.rejection_reason}. "
+                            "Conservative fallback used."
+                        ],
+                        prefix_reasoning=(
+                            f"Layer 3 Composer rejected transition: {candidate_plan.composer_rationale}"
+                        ),
+                    )
+                composed_plan = candidate_plan
+            except Exception as e:
+                warnings.append(f"Musical IR composition planner fallback: {e}")
+
+        if composed_plan is not None:
+            archetype = composed_plan.archetype
+            transition_mode = composed_plan.transition_mode
+            feasibility_score = composed_plan.feasibility_score
+            composer_rationale = composed_plan.composer_rationale
+            launchpad_a = composed_plan.launchpad_phrase_a.end_time_s
+            impact_b = composed_plan.impact_phrase_b.start_time_s
+            tempo_a = composed_plan.hypothesis_a.bpm
+            tempo_b = composed_plan.hypothesis_b.bpm
+            lead_in_bars = 2
+            beat_duration_a = 60.0 / tempo_a
+            beat_duration_b = 60.0 / tempo_b
+            bar_duration_a = beat_duration_a * 4.0
+            bar_duration_b = beat_duration_b * 4.0
+            bridge_start_a = max(0.0, launchpad_a - lead_in_bars * bar_duration_a)
+            breath_beats = composed_plan.breath_beats
+            if breath_beats == 0:
+                breath_start = launchpad_a
+                breath_end = launchpad_a
+            else:
+                breath_dur_s = breath_beats * beat_duration_b
+                breath_start = max(0.0, impact_b - breath_dur_s)
+                breath_end = impact_b
+            anchor_conf = feasibility_score
+        else:
+            # Fall back to heuristic anchor selection
+            anchor_result = select_launchpad_and_impact(
+                context,
+                lead_in_bars=2,
+                min_confidence=context.config.analysis.tempo_confidence_threshold,
+                bridge_bars=8,
+            )
+            if not anchor_result.success:
+                return _conservative_plan(
+                    context,
+                    requested_strategy=context.requested_strategy,
+                    extra_warnings=[
+                        f"Studio Remix anchor selection failed: {anchor_result.fallback_reason}. "
+                        "Conservative fallback used."
+                    ],
+                    prefix_reasoning=(
+                        "Could not identify suitable launchpad and impact anchors for "
+                        "the Studio Remix bridge. Falling back to conservative crossfade."
+                    ),
+                )
+            archetype = "VACUUM_BREATH_DROP"
+            transition_mode = "CONTINUOUS_TEMPO_WARP"
+            feasibility_score = anchor_result.confidence
+            composer_rationale = "Phrase-aligned heuristic launchpad selection."
+            launchpad_a = anchor_result.launchpad_a_s
+            impact_b = anchor_result.impact_b_s
+            breath_start = anchor_result.breath_window_start_s
+            breath_end = anchor_result.breath_window_end_s
+            bridge_start_a = anchor_result.bridge_start_a_s
+            lead_in_bars = anchor_result.lead_in_bars
+            tempo_a = anchor_result.tempo_a_bpm or context.analysis_a.tempo_bpm
+            tempo_b = anchor_result.tempo_b_bpm or context.analysis_b.tempo_bpm
+
+            if tempo_a is None or tempo_b is None:
+                return _conservative_plan(
+                    context,
+                    requested_strategy=context.requested_strategy,
+                    extra_warnings=["Tempo unavailable for Studio Remix timing."],
+                    prefix_reasoning="Tempo detection failed for one or both tracks.",
+                )
+
+            beat_duration_a = 60.0 / tempo_a
+            beat_duration_b = 60.0 / tempo_b
+            bar_duration_a = beat_duration_a * 4.0
+            bar_duration_b = beat_duration_b * 4.0
+            breath_beats = 2 if breath_end > breath_start else 0
+            anchor_conf = anchor_result.confidence
+
+        # The bridge duration: 8 bars (bridge) + 4 bars (ghost resolution) = 12 bars
+        bridge_bars = 8
+        ghost_bars = 4
+        total_bridge_bars = bridge_bars + ghost_bars
+        bridge_duration_s = total_bridge_bars * bar_duration_a
+
+        # Transition starts at bridge_start_a, ends at end of Song A
+        duration = context.song_a.duration_s - bridge_start_a
+
+        # Clamp to valid range
+        minimum = context.config.transition.min_duration_s
+        maximum = context.max_duration_s
+        if duration < minimum:
+            duration = minimum
+        if duration > maximum:
+            duration = maximum
+
+        # Determine available bars for the matrix
+        available_bars = max(2, int(duration / bar_duration_a))  # At least 2 bars
+        matrix_bars = min(12, available_bars)  # Cap at 12 bars max
+
+        floor_db = context.config.transition.fade_floor_db
+
+        # Build automations following the adaptive Producer Matrix
+        automations = self._build_studio_remix_automations(
+            context,
+            view_a,
+            view_b,
+            duration,
+            bridge_start_a,
+            launchpad_a,
+            impact_b,
+            breath_start,
+            breath_end,
+            bar_duration_a,
+            bar_duration_b,
+            floor_db,
+            tempo_a,
+            tempo_b,
+            reasoning,
+            warnings,
+            archetype=archetype,
+            breath_beats=breath_beats,
+        )
+
+        # Add reasoning
+        ghost_bars = min(4, max(1, matrix_bars // 3))
+        bridge_bars = matrix_bars - ghost_bars
+        if composed_plan:
+            reasoning.append(
+                f"Layer 3 Composer: Archetype={archetype}, Mode={transition_mode}, Feasibility={feasibility_score:.3f}."
+            )
+            reasoning.append(f"Composer Rationale: {composer_rationale}")
+
+        reasoning.extend([
+            f"Studio Remix (Song C) bridge: {matrix_bars} bars ({bridge_bars} bridge + {ghost_bars} ghost) "
+            f"from {bridge_start_a:.2f}s to {context.song_a.duration_s:.2f}s in Song A.",
+            f"Launchpad (T_launch): Song A downbeat at {launchpad_a:.3f}s - "
+            f"phrase-aligned, groove energy maximized, vocal concluding.",
+            f"Impact (T_impact): Song B downbeat at {impact_b:.3f}s - "
+            f"the Drop! Low-end surge maximized, kick crest factor peak.",
+            f"Breath Window: {breath_start:.3f}s – {breath_end:.3f}s in Song B "
+            f"({(breath_end - breath_start) / max(1e-4, beat_duration_b):.1f} beats acoustic vacuum).",
+            f"Song B cued at offset {impact_b - lead_in_bars * bar_duration_b:.3f}s "
+            f"({lead_in_bars} bars lead-in) for phase-locked impact.",
+        ])
+
+        metadata = {
+            "studio_remix": True,
+            "archetype": archetype,
+            "transition_mode": transition_mode,
+            "feasibility_score": round(feasibility_score, 4),
+            "composer_rationale": composer_rationale,
+            "bridge_bars": bridge_bars,
+            "ghost_bars": ghost_bars,
+            "total_bridge_bars": total_bridge_bars,
+            "launchpad_a_s": round(launchpad_a, 6),
+            "impact_b_s": round(impact_b, 6),
+            "breath_start_s": round(breath_start, 6),
+            "breath_end_s": round(breath_end, 6),
+            "breath_beats": breath_beats,
+            "bridge_start_a_s": round(bridge_start_a, 6),
+            "lead_in_bars": lead_in_bars,
+            "tempo_a": round(tempo_a, 3),
+            "tempo_b": round(tempo_b, 3),
+            "anchor_confidence": round(anchor_conf, 4),
+            "phase_locked": True,
+            "low_end_monogamy": True,
+            "zdf_filter_sweeps": True,
+            "ghost_resolution": True,
+            "sidechain_ducking": True,
+        }
+
+        return _make_plan(
+            context,
+            strategy=self.name,
+            duration_s=duration,
+            automations=automations,
+            reasoning=reasoning,
+            warnings=warnings,
+            metadata=metadata,
+        )
+
+    def _build_studio_remix_automations(
+        self,
+        context: TransitionContext,
+        view_a: dict,
+        view_b: dict,
+        duration_s: float,
+        bridge_start_a: float,
+        launchpad_a: float,
+        impact_b: float,
+        breath_start: float,
+        breath_end: float,
+        bar_duration_a: float,
+        bar_duration_b: float,
+        floor_db: float,
+        tempo_a: float,
+        tempo_b: float,
+        reasoning: list,
+        warnings: list,
+        archetype: str = "VACUUM_BREATH_DROP",
+        breath_beats: int = 2,
+    ) -> list[StemAutomation]:
+        """Build stem automations following the 12-bar Producer Matrix from Model 4 Argon.
+
+        Adapts matrix size and phase boundaries based on available transition duration.
+        """
+        sample_rate = context.song_a.sample_rate
+        nyquist_limit = (sample_rate / 2.0) * 0.95
+
+        # Time in transition coordinates (0 = bridge_start_a, duration_s = end of transition)
+        launchpad_trans = launchpad_a - bridge_start_a
+
+        # Determine the 4 producer matrix phases across duration_s:
+        # Phase 1: Intro / Lead-in (0.0 -> t_intro)
+        # Phase 2: Build-up / Filter Sweeps (t_intro -> t_breath)
+        # Phase 3: Breath Window (t_breath -> t_impact)
+        # Phase 4: Impact Drop & Ghost Decay (t_impact -> duration_s)
+
+        if 0.35 * duration_s <= launchpad_trans <= 0.85 * duration_s:
+            t_impact = launchpad_trans
+        else:
+            t_impact = (2.0 / 3.0) * duration_s
+
+        t_intro = t_impact * 0.5
+
+        # Breath window: 1-2 beats before impact, bounded within Phase 2
+        build_duration = t_impact - t_intro
+        max_breath = build_duration * 0.35
+        if archetype == "CONTINUOUS_CROSS_FILTER" or breath_beats == 0:
+            breath_dur = 0.0
+            t_breath = t_impact
+            eps_cut = 0.005
+        else:
+            raw_breath = max(0.04, float(breath_end - breath_start)) if (breath_end > breath_start) else (bar_duration_b * 0.25)
+            breath_dur = max(0.02, min(max_breath, raw_breath))
+            t_breath = t_impact - breath_dur
+            eps_cut = min(0.005, breath_dur * 0.15)
+
+        # Helper to create guaranteed strictly increasing GainPoints within [0, duration_s]
+        def gain_automation(raw_points: list[tuple[float, float]]) -> tuple[GainPoint, ...]:
+            if not raw_points:
+                return (GainPoint(0.0, 0.0), GainPoint(duration_s, 0.0))
+
+            sorted_pts = sorted(raw_points, key=lambda p: p[0])
+            cfg_floor = floor_db
+            cfg_max = context.config.transition.max_automation_gain_db
+
+            cleaned: list[GainPoint] = []
+            for t, db in sorted_pts:
+                t_cl = max(0.0, min(duration_s, float(t)))
+                db_cl = max(cfg_floor, min(cfg_max, float(db)))
+                cleaned.append(GainPoint(t_cl, db_cl))
+
+            deduped: list[GainPoint] = []
+            for pt in cleaned:
+                if deduped and abs(pt.time_s - deduped[-1].time_s) <= 1e-4:
+                    deduped[-1] = pt
+                elif not deduped or pt.time_s > deduped[-1].time_s:
+                    deduped.append(pt)
+
+            if len(deduped) < 2:
+                if not deduped:
+                    return (GainPoint(0.0, 0.0), GainPoint(duration_s, 0.0))
+                only = deduped[0]
+                if only.time_s > 0.0:
+                    deduped.insert(0, GainPoint(0.0, only.gain_db))
+                if only.time_s < duration_s:
+                    deduped.append(GainPoint(duration_s, only.gain_db))
+
+            if deduped[0].time_s > 1e-4:
+                deduped.insert(0, GainPoint(0.0, deduped[0].gain_db))
+            else:
+                deduped[0] = GainPoint(0.0, deduped[0].gain_db)
+
+            if deduped[-1].time_s < duration_s - 1e-4:
+                deduped.append(GainPoint(duration_s, deduped[-1].gain_db))
+            else:
+                deduped[-1] = GainPoint(duration_s, deduped[-1].gain_db)
+
+            # Enforce strictly increasing timestamps
+            final_pts: list[GainPoint] = [deduped[0]]
+            for pt in deduped[1:]:
+                if pt.time_s > final_pts[-1].time_s + 1e-4:
+                    final_pts.append(pt)
+                else:
+                    final_pts[-1] = pt
+
+            if len(final_pts) < 2:
+                final_pts = [GainPoint(0.0, final_pts[0].gain_db), GainPoint(duration_s, final_pts[0].gain_db)]
+            if final_pts[-1].time_s < duration_s:
+                final_pts.append(GainPoint(duration_s, final_pts[-1].gain_db))
+
+            return tuple(final_pts)
+
+        # Helper to construct validated EffectSpec objects
+        def make_effect(
+            kind: str,
+            start_s: float,
+            end_s: float,
+            start_hz: float = 1000.0,
+            end_hz: float = 1000.0,
+            params: dict | None = None,
+        ) -> EffectSpec | None:
+            s = max(0.0, min(duration_s, float(start_s)))
+            e = max(0.0, min(duration_s, float(end_s)))
+            if e - s < 0.01:
+                return None
+            s_hz = max(25.0, min(nyquist_limit, float(start_hz)))
+            e_hz = max(25.0, min(nyquist_limit, float(end_hz)))
+            return EffectSpec(
+                kind=kind,
+                start_s=round(s, 6),
+                end_s=round(e, 6),
+                start_hz=round(s_hz, 2),
+                end_hz=round(e_hz, 2),
+                params=params,
+            )
+
+        automations: list[StemAutomation] = []
+
+        # ============================================================
+        # SONG A AUTOMATIONS (Outgoing) - Exact Producer Rules Matrix
+        # ============================================================
+
+        for stem_name in _ordered_names(view_a):
+            effects: tuple[EffectSpec, ...] = ()
+
+            if stem_name == "bass":
+                pts = gain_automation([
+                    (0.0, 0.0),
+                    (t_intro, 0.0),
+                    (t_intro + eps_cut, -3.0),
+                    (t_breath, -18.0),
+                    (t_impact, floor_db),
+                    (duration_s, floor_db),
+                ])
+                effects = tuple(
+                    e for e in [
+                        make_effect("zdf_highpass_sweep", t_intro, t_impact, 110.0, 450.0, params={"filter_type": "TPT_SVF", "resonance": 1.0}),
+                        make_effect("sidechain_duck", t_intro, t_impact, params={"source": "song_b_drums", "ratio": 4.0}),
+                    ] if e is not None
+                )
+                reasoning.append(
+                    "Low-End Monogamy: Song A bass 0dB, HPF 110→450 Hz + 4:1 duck by B drums, muted at impact."
+                )
+
+            elif stem_name == "drums":
+                if archetype == "GHOST_WASH_SUSPENSION":
+                    pts = gain_automation([
+                        (0.0, 0.0),
+                        (t_intro * 0.7, 0.0),
+                        (t_intro, floor_db),
+                        (duration_s, floor_db),
+                    ])
+                    effects = tuple(
+                        e for e in [
+                            make_effect("zdf_highpass_sweep", 0.0, t_intro, 30.0, 300.0),
+                            make_effect("dub_delay_send", 0.0, t_intro, params={"delay_note": 0.75, "feedback": 0.6}),
+                        ] if e is not None
+                    )
+                    reasoning.append(
+                        "Ghost Wash: Song A drums dissolve early at intro into ambient dub delay wash."
+                    )
+                else:
+                    pts = gain_automation([
+                        (0.0, 0.0),
+                        (t_intro, 0.0),
+                        (t_breath, -4.5),
+                        (t_breath + eps_cut, floor_db),
+                        (duration_s, floor_db),
+                    ])
+                    effects = tuple(
+                        e for e in [
+                            make_effect("zdf_highpass_sweep", 0.0, t_intro, 30.0, 60.0),
+                            make_effect("zdf_highpass_sweep", t_intro, t_breath, 60.0, 650.0, params={"resonance": 1.4}),
+                            make_effect("dub_delay_send", t_intro, t_breath, params={"delay_note": 0.75, "feedback": 0.45}),
+                        ] if e is not None
+                    )
+                    reasoning.append(
+                        "Song A drums: 0dB, HPF 60→650 Hz Q=1.4 + Gain -1.5→-4.5dB + dub-delay, hard cut at breath."
+                    )
+
+            elif stem_name == "vocals":
+                if archetype == "CONTINUOUS_CROSS_FILTER" or breath_beats == 0:
+                    pts = gain_automation([
+                        (0.0, 0.0),
+                        (t_intro, 0.0),
+                        (t_impact, 0.0),
+                        (t_impact + eps_cut, floor_db),
+                        (duration_s, floor_db),
+                    ])
+                    effects = tuple(
+                        e for e in [
+                            make_effect("dub_delay_send", 0.0, t_intro, params={"delay_note": 0.25, "send_level": -18.0}),
+                            make_effect("zdf_highpass_sweep", t_intro, t_impact, 180.0, 800.0, params={"resonance": 1.2}),
+                            make_effect("spatial_freeze", t_intro, duration_s, params={"wet_mix_start": 0.15, "wet_mix_end": 0.65, "freeze_mode": True, "freeze_engage_s": t_impact, "freeze_release_s": min(duration_s, t_impact + 0.5), "T60": 6.5}),
+                            make_effect("sidechain_duck", t_impact, duration_s, params={"source": "song_b_drums", "ratio": 8.0, "release_ms": 150.0}),
+                        ] if e is not None
+                    )
+                    reasoning.append(
+                        "Continuous Cross-Filter: Song A vocals sustained across boundary without breath cutoff, sidechained post-impact."
+                    )
+                else:
+                    pts = gain_automation([
+                        (0.0, 0.0),
+                        (t_intro, 0.0),
+                        (t_breath, 0.0),
+                        (t_breath + eps_cut, floor_db),
+                        (duration_s, floor_db),
+                    ])
+                    effects = tuple(
+                        e for e in [
+                            make_effect("dub_delay_send", 0.0, t_intro, params={"delay_note": 0.25, "send_level": -18.0}),
+                            make_effect("zdf_highpass_sweep", t_intro, t_breath, 180.0, 800.0, params={"resonance": 1.2}),
+                            make_effect("spatial_freeze", t_intro, duration_s, params={"wet_mix_start": 0.15, "wet_mix_end": 0.65, "freeze_mode": True, "freeze_engage_s": t_breath, "freeze_release_s": t_impact, "T60": 6.5}),
+                            make_effect("sidechain_duck", t_impact, duration_s, params={"source": "song_b_drums", "ratio": 8.0, "release_ms": 150.0}),
+                        ] if e is not None
+                    )
+                    reasoning.append(
+                        "Song A vocals: Dry lead, chopped hook HPF 180→800 Hz, FDN FREEZE at breath, ghost decay sidechained to B drums."
+                    )
+
+            elif stem_name == "other":
+                pts = gain_automation([
+                    (0.0, 0.0),
+                    (t_intro, 0.0),
+                    (t_breath, 0.0),
+                    (t_breath + eps_cut, floor_db),
+                    (duration_s, floor_db),
+                ])
+                effects = tuple(
+                    e for e in [
+                        make_effect("sidechain_duck", 0.0, t_breath, params={"source": "song_b_drums", "ratio": 3.0}),
+                        make_effect("zdf_highpass_sweep", t_intro, t_breath, 120.0, 1200.0, params={"resonance": 2.2}),
+                        make_effect("stereo_width", t_intro, t_breath, params={"width_start": 1.0, "width_end": 1.8}),
+                        make_effect("spatial_freeze", t_intro, duration_s, params={"wet_mix_start": 0.20, "wet_mix_end": 0.70, "freeze_mode": True, "freeze_engage_s": t_breath, "freeze_release_s": t_impact, "T60": 8.0}),
+                        make_effect("sidechain_duck", t_impact, duration_s, params={"source": "song_b_drums", "ratio": 4.0}),
+                    ] if e is not None
+                )
+                reasoning.append(
+                    "Song A other: 0dB + duck by B drums, ZDF HPF 120→1200 Hz Q=2.2 + stereo widen, FDN FREEZE at breath, ghost decay."
+                )
+
+            else:
+                pts = gain_automation([
+                    (0.0, 0.0),
+                    (t_impact, 0.0),
+                    (duration_s, floor_db),
+                ])
+                effects = ()
+
+            automations.append(
+                StemAutomation(
+                    source="a",
+                    stem=stem_name,
+                    points=pts,
+                    curve="smoothstep",
+                    effects=effects,
+                )
+            )
+
+        # ============================================================
+        # SONG B AUTOMATIONS (Incoming) - Exact Producer Rules Matrix
+        # ============================================================
+
+        for stem_name in _ordered_names(view_b):
+            effects = ()
+
+            if stem_name == "drums":
+                pts = gain_automation([
+                    (0.0, -18.0),
+                    (t_intro, -4.0),
+                    (t_breath, -1.0),
+                    (t_impact, 0.0),
+                    (duration_s, 0.0),
+                ])
+                effects = tuple(
+                    e for e in [
+                        make_effect("zdf_highpass", 0.0, t_intro, 220.0, 220.0),
+                        make_effect("zdf_highpass_sweep", t_intro, t_breath, 220.0, 90.0),
+                        make_effect("sidechain_trigger", t_impact, duration_s, params={"target": "song_a_vocals", "ratio": 8.0}),
+                        make_effect("sidechain_trigger", t_impact, duration_s, params={"target": "song_a_other", "ratio": 4.0}),
+                    ] if e is not None
+                )
+                reasoning.append(
+                    "Song B drums: Tease HPF@220Hz, HPF 220→90Hz build, Full drop @ impact driving sidechain."
+                )
+
+            elif stem_name == "bass":
+                pts = gain_automation([
+                    (0.0, floor_db),
+                    (t_intro, floor_db),
+                    (t_intro + eps_cut, -9.0),
+                    (t_breath, -6.0),
+                    (t_breath + eps_cut, floor_db),
+                    (t_impact, 0.0),
+                    (duration_s, 0.0),
+                ])
+                effects = tuple(
+                    e for e in [
+                        make_effect("zdf_lowpass", t_intro, t_breath, 110.0, 110.0),
+                    ] if e is not None
+                )
+                reasoning.append(
+                    "Song B bass: Muted early, Sub-swell -9dB LPF@110Hz build, Muted at breath, Full authority @ impact."
+                )
+
+            elif stem_name == "vocals":
+                if archetype == "CONTINUOUS_CROSS_FILTER" or breath_beats == 0:
+                    pts = gain_automation([
+                        (0.0, -18.0),
+                        (t_intro, -12.0),
+                        (t_impact, -3.0),
+                        (t_impact + eps_cut, 0.0),
+                        (duration_s, 0.0),
+                    ])
+                    effects = tuple(
+                        e for e in [
+                            make_effect("zdf_bandpass", 0.0, t_intro, 400.0, 3500.0),
+                            make_effect("zdf_bandpass", t_intro, t_impact, 400.0, 8000.0),
+                        ] if e is not None
+                    )
+                    reasoning.append(
+                        "Continuous Cross-Filter: Song B vocals build gently across intro/impact into full lead."
+                    )
+                else:
+                    pts = gain_automation([
+                        (0.0, -18.0),
+                        (t_intro, -9.0),
+                        (t_breath, -2.0),
+                        (t_breath + eps_cut, 0.0),
+                        (duration_s, 0.0),
+                    ])
+                    effects = tuple(
+                        e for e in [
+                            make_effect("zdf_bandpass", 0.0, t_intro, 400.0, 3500.0),
+                            make_effect("zdf_bandpass", t_intro, t_breath, 400.0, 8000.0),
+                        ] if e is not None
+                    )
+                    reasoning.append(
+                        "Song B vocals: Ad-libs Bandpass 400-3500Hz, Rising hook, Solo spotlight @ breath, Full lead @ impact."
+                    )
+
+            elif stem_name == "other":
+                pts = gain_automation([
+                    (0.0, -18.0),
+                    (t_intro, -6.0),
+                    (t_breath, -1.5),
+                    (t_impact, 0.0),
+                    (duration_s, 0.0),
+                ])
+                effects = tuple(
+                    e for e in [
+                        make_effect("zdf_lowpass_sweep", 0.0, t_intro, 400.0, 2500.0),
+                        make_effect("zdf_lowpass_sweep", t_intro, t_breath, 2500.0, 10000.0),
+                    ] if e is not None
+                )
+                reasoning.append(
+                    "Song B other: Tease LPF 400→2500Hz, LPF opens 2.5k→10kHz -6→-1.5dB, Full synth drop @ impact."
+                )
+
+            else:
+                pts = gain_automation([
+                    (0.0, floor_db),
+                    (t_impact, 0.0),
+                    (duration_s, 0.0),
+                ])
+                effects = ()
+
+            automations.append(
+                StemAutomation(
+                    source="b",
+                    stem=stem_name,
+                    points=pts,
+                    curve="smoothstep",
+                    effects=effects,
+                )
+            )
+
+        return automations
+
+
 class OptimizedStrategy:
     name = "optimized"
     description = "Objective-based role-aware timing search (RATO)."
@@ -1105,6 +1764,7 @@ def build_core_registry() -> StrategyRegistry:
         RhythmicStrategy(),
         AtmosphericStrategy(),
         ConservativeStrategy(),
+        StudioRemixStrategy(),  # New Studio Remix strategy
         OptimizedStrategy(),
     ):
         registry.register(strategy)

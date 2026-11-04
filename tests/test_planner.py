@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import math
 
@@ -29,7 +30,7 @@ def _analyses(song_a, song_b, tempo_a=120.0, tempo_b=120.0, confidence=0.9):
     )
 
 
-def test_all_six_core_strategies_are_registered():
+def test_all_seven_core_strategies_are_registered():
     registry = build_core_registry()
     assert registry.names() == (
         "atmospheric",
@@ -38,6 +39,7 @@ def test_all_six_core_strategies_are_registered():
         "optimized",
         "rhythmic",
         "stem_level",
+        "studio_remix",
     )
     for name in registry.names():
         strategy = registry.get(name)
@@ -457,3 +459,88 @@ def test_plan_serializes_to_json(synthetic_pair):
     assert decoded["strategy"] == "stem_level"
     assert len(decoded["automations"]) == 8
     assert decoded["automations"][0]["points"]
+
+
+def test_studio_remix_strategy_falls_back_without_stems(synthetic_pair):
+    song_a, song_b = synthetic_pair
+    analysis_a, analysis_b = _analyses(song_a, song_b)
+    plan = plan_transition(
+        song_a.mix,
+        song_b.mix,
+        strategy="studio_remix",
+        duration_s=8.0,
+        analysis_a=analysis_a,
+        analysis_b=analysis_b,
+    )
+    assert plan.strategy == "conservative"
+    assert any("Studio Remix requires stems" in w for w in plan.warnings)
+
+
+def test_studio_remix_strategy_plans_with_stems(synthetic_pair):
+    song_a, song_b = synthetic_pair
+    downbeats_a = tuple(float(i * 2.0) for i in range(16))
+    downbeats_b = tuple(float(i * 2.0) for i in range(16))
+    analysis_a = replace(
+        make_analysis(song_a.mix, tempo_bpm=120.0, confidence=0.9),
+        downbeat_times_s=downbeats_a,
+    )
+    analysis_b = replace(
+        make_analysis(song_b.mix, tempo_bpm=120.0, confidence=0.9),
+        downbeat_times_s=downbeats_b,
+    )
+    plan = plan_transition(
+        song_a.mix,
+        song_b.mix,
+        stems_a=song_a.stems,
+        stems_b=song_b.stems,
+        strategy="studio_remix",
+        duration_s=8.0,
+        analysis_a=analysis_a,
+        analysis_b=analysis_b,
+    )
+    assert plan.strategy == "studio_remix"
+    assert plan.metadata.get("studio_remix") is True
+    assert "launchpad_a_s" in plan.metadata
+    assert "impact_b_s" in plan.metadata
+    assert len(plan.automations) == 8
+    validate_plan(plan, sample_rate=song_a.mix.sample_rate)
+
+
+def test_studio_remix_strategy_renders_safely(synthetic_pair):
+    import numpy as np
+    from dcp.rendering import render_plan
+
+    song_a, song_b = synthetic_pair
+    downbeats_a = tuple(float(i * 2.0) for i in range(16))
+    downbeats_b = tuple(float(i * 2.0) for i in range(16))
+    analysis_a = replace(
+        make_analysis(song_a.mix, tempo_bpm=120.0, confidence=0.9),
+        downbeat_times_s=downbeats_a,
+    )
+    analysis_b = replace(
+        make_analysis(song_b.mix, tempo_bpm=120.0, confidence=0.9),
+        downbeat_times_s=downbeats_b,
+    )
+    plan = plan_transition(
+        song_a.mix,
+        song_b.mix,
+        stems_a=song_a.stems,
+        stems_b=song_b.stems,
+        strategy="studio_remix",
+        duration_s=8.0,
+        analysis_a=analysis_a,
+        analysis_b=analysis_b,
+    )
+    rendered = render_plan(
+        song_a.mix,
+        song_b.mix,
+        plan,
+        stems_a=song_a.stems,
+        stems_b=song_b.stems,
+    )
+    assert rendered.audio.channels == 2
+    assert rendered.audio.frames > 0
+    assert np.all(np.isfinite(rendered.audio.samples))
+    assert np.max(np.abs(rendered.audio.samples)) <= 1.0
+
+

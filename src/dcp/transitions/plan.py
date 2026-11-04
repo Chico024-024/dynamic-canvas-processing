@@ -10,7 +10,22 @@ from ..models import PlanValidationError
 
 _ALLOWED_SOURCES = ("a", "b")
 _ALLOWED_CURVES = ("smoothstep", "linear")
-_ALLOWED_EFFECTS = ("lowpass_sweep",)
+_ALLOWED_EFFECTS = (
+    "lowpass_sweep",
+    "highpass_sweep",
+    "bandpass_sweep",
+    "zdf_highpass_sweep",
+    "zdf_lowpass_sweep",
+    "zdf_bandpass_sweep",
+    "zdf_highpass",
+    "zdf_lowpass",
+    "zdf_bandpass",
+    "spatial_freeze",
+    "sidechain_duck",
+    "sidechain_trigger",
+    "dub_delay_send",
+    "stereo_width",
+)
 _TIME_TOLERANCE = 1e-6
 
 
@@ -26,10 +41,31 @@ class GainPoint:
 class EffectSpec:
     """A supported per-stem effect.
 
-    ``lowpass_sweep`` applies two cascaded one-pole low-pass stages whose cutoff
-    glides from ``start_hz`` to ``end_hz`` between ``start_s`` and ``end_s``
-    (both relative to the transition start). The final cutoff is held after the
-    sweep. Effects are optional metadata on a stem automation.
+    Effect kinds:
+    - ``lowpass_sweep``: Two cascaded one-pole low-pass stages, cutoff glides from start_hz to end_hz.
+    - ``highpass_sweep``: Two cascaded one-pole high-pass stages, cutoff glides from start_hz to end_hz.
+    - ``bandpass_sweep``: Two cascaded one-pole band-pass stages, center frequency glides.
+    - ``zdf_highpass_sweep``: Zero-delay feedback high-pass filter sweep (TPT SVF), supports resonance.
+    - ``zdf_lowpass_sweep``: Zero-delay feedback low-pass filter sweep (TPT SVF).
+    - ``zdf_bandpass_sweep``: Zero-delay feedback band-pass filter sweep (TPT SVF).
+    - ``zdf_highpass``: Static ZDF high-pass filter.
+    - ``zdf_lowpass``: Static ZDF low-pass filter.
+    - ``zdf_bandpass``: Static ZDF band-pass filter.
+    - ``spatial_freeze``: Damped Spatial Freeze (Hadamard FDN) with freeze mode and damping.
+    - ``sidechain_duck``: Transient-driven sidechain compression/ducking.
+    - ``sidechain_trigger``: Sidechain trigger for driving ducking on other stems.
+    - ``dub_delay_send``: Tempo-synced dub delay send with feedback.
+    - ``stereo_width``: Stereo width expansion/contraction.
+
+    Parameters are passed via the ``params`` field as a dict, allowing flexible
+    configuration per effect type. Common params include:
+    - resonance/Q factor for ZDF filters
+    - filter_type (e.g., "TPT_SVF")
+    - stages for cascaded filters
+    - attack_ms, release_ms, ratio, threshold_db for sidechain
+    - wet_mix, freeze_mode, T60, delay_primes for spatial_freeze
+    - delay_note, send_level, feedback for dub_delay_send
+    - width_start, width_end for stereo_width
     """
 
     kind: str = "lowpass_sweep"
@@ -37,6 +73,8 @@ class EffectSpec:
     end_hz: float = 1200.0
     start_s: float = 0.0
     end_s: float | None = None
+    # Flexible parameters dict for effect-specific configuration
+    params: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -195,17 +233,28 @@ def validate_plan(
             effect_label = f"{label}.effects[{effect_index}]"
             if effect.kind not in _ALLOWED_EFFECTS:
                 errors.append(f"{effect_label}: unsupported effect kind {effect.kind!r}")
-            if not _is_finite(effect.start_hz) or effect.start_hz <= 20.0:
-                errors.append(f"{effect_label}: start_hz must be greater than 20 Hz")
-            if not _is_finite(effect.end_hz) or effect.end_hz <= 20.0:
-                errors.append(f"{effect_label}: end_hz must be greater than 20 Hz")
-            if nyquist is not None:
-                limit = nyquist * 0.98
-                if effect.start_hz >= limit or effect.end_hz >= limit:
-                    errors.append(
-                        f"{effect_label}: cutoff must stay below the Nyquist "
-                        f"limit ({limit:.0f} Hz) for {sample_rate} Hz audio"
-                    )
+
+            # Effects that use frequency sweep parameters
+            freq_sweep_kinds = {
+                "lowpass_sweep", "highpass_sweep", "bandpass_sweep",
+                "zdf_highpass_sweep", "zdf_lowpass_sweep", "zdf_bandpass_sweep",
+                "zdf_highpass", "zdf_lowpass", "zdf_bandpass",
+            }
+
+            if effect.kind in freq_sweep_kinds:
+                if not _is_finite(effect.start_hz) or effect.start_hz <= 20.0:
+                    errors.append(f"{effect_label}: start_hz must be greater than 20 Hz")
+                if not _is_finite(effect.end_hz) or effect.end_hz <= 20.0:
+                    errors.append(f"{effect_label}: end_hz must be greater than 20 Hz")
+                if nyquist is not None:
+                    limit = nyquist * 0.98
+                    if effect.start_hz >= limit or effect.end_hz >= limit:
+                        errors.append(
+                            f"{effect_label}: cutoff must stay below the Nyquist "
+                            f"limit ({limit:.0f} Hz) for {sample_rate} Hz audio"
+                        )
+
+            # All effects have time bounds
             end_s = plan.duration_s if effect.end_s is None else effect.end_s
             if not _is_finite(effect.start_s) or effect.start_s < -_TIME_TOLERANCE:
                 errors.append(f"{effect_label}: start_s must be non-negative")
@@ -213,6 +262,8 @@ def validate_plan(
                 errors.append(f"{effect_label}: end_s must be within the transition")
             if end_s <= effect.start_s + _TIME_TOLERANCE:
                 errors.append(f"{effect_label}: end_s must be after start_s")
+
+            # Params dict is optional and unvalidated (flexible per effect type)
 
     if "a" not in sources:
         errors.append("plan must include at least one automation for source 'a'")

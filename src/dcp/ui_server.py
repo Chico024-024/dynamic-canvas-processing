@@ -308,6 +308,9 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                 waveform_a = self._generate_waveform_envelope(song_a)
                 waveform_b = self._generate_waveform_envelope(song_b)
 
+                from .rendering.telemetry import evaluate_bridge_telemetry
+                telemetry_report = evaluate_bridge_telemetry(mix_result.audio.samples, sr=mix_result.audio.sample_rate)
+
                 plan_dict = plan.to_dict() if hasattr(plan, "to_dict") else {}
                 result = {
                     "mix_id": mix_id,
@@ -323,6 +326,8 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                     "automations": plan_dict.get("automations", []),
                     "waveform_a": waveform_a,
                     "waveform_b": waveform_b,
+                    "metadata": plan.metadata,
+                    "telemetry": telemetry_report.to_dict(),
                 }
                 self._send_json_response(result)
 

@@ -78,6 +78,7 @@ def test_absence_of_advanced_keeps_core_fully_operational(monkeypatch):
         "optimized",
         "rhythmic",
         "stem_level",
+        "studio_remix",
     )
 
     song = make_tone(duration_s=3.0)
@@ -96,7 +97,7 @@ def test_broken_plugin_is_reported_without_breaking_core(monkeypatch):
     assert len(status.errors) == 1
     assert "ImportError" in status.errors[0]
     assert "Core remains fully operational" in status.detail
-    assert len(registry) == 6
+    assert len(registry) == 7
 
 
 def test_discovery_failure_is_recorded(monkeypatch):
@@ -110,7 +111,7 @@ def test_discovery_failure_is_recorded(monkeypatch):
 
     assert status.available is False
     assert any("discovery failed" in error for error in status.errors)
-    assert len(registry) == 6
+    assert len(registry) == 7
 
 
 def test_valid_plugin_is_registered_and_usable(monkeypatch):
@@ -166,7 +167,7 @@ def test_plugin_without_identity_is_rejected(monkeypatch):
 
     assert status.available is False
     assert any("non-empty name" in error for error in status.errors)
-    assert len(registry) == 6
+    assert len(registry) == 7
 
 
 def test_build_planner_with_advanced_returns_core_planner(monkeypatch):

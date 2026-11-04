@@ -17,6 +17,115 @@ from ..transitions.plan import StemAutomation, TransitionPlan, validate_plan
 from ..transitions.curves import interpolate_gain
 from .common import RenderResult, add_unique_note, finalize_output
 from .effects import apply_lowpass_sweep
+from .dsp_fallback import (
+    process_zdf_svf_sweep_numpy,
+    process_sidechain_compressor_numpy,
+    process_fdn_freeze_numpy,
+    time_stretch_phase_vocoder_numpy,
+)
+
+
+def apply_effect_spec_to_stem(
+    stem_audio: np.ndarray,
+    effect: Any,
+    sr: int,
+    bpm: float = 126.0,
+    sidechain_key_audio: np.ndarray | None = None,
+    transition_start_s: float = 0.0,
+    transition_duration_s: float | None = None,
+) -> np.ndarray:
+    """
+    Slices [start_sample : end_sample] from `stem_audio` and executes the EffectSpec.
+    """
+    n_total = stem_audio.shape[-1]
+    eff_end = transition_duration_s if getattr(effect, "end_s", None) is None else float(effect.end_s)
+    s_sec = float(transition_start_s) + float(getattr(effect, "start_s", 0.0))
+    e_sec = float(transition_start_s) + eff_end
+
+    s_idx = int(np.clip(round(s_sec * sr), 0, n_total))
+    e_idx = int(np.clip(round(e_sec * sr), s_idx, n_total))
+    if e_idx <= s_idx:
+        return stem_audio
+
+    out = stem_audio.copy()
+    segment = out[..., s_idx:e_idx]
+    kind = getattr(effect, "kind", getattr(effect, "effect_type", "")).lower()
+    params = getattr(effect, "params", {}) or {}
+
+    if kind in (
+        "hpf_sweep", "lpf_sweep", "bpf_sweep", "zdf_sweep",
+        "zdf_highpass_sweep", "zdf_lowpass_sweep", "zdf_bandpass_sweep",
+        "zdf_highpass", "zdf_lowpass", "zdf_bandpass",
+        "highpass_sweep", "bandpass_sweep",
+    ):
+        if "highpass" in kind or "hpf" in kind:
+            mode = "hpf"
+        elif "bandpass" in kind or "bpf" in kind:
+            mode = "bpf"
+        elif "lowpass" in kind or "lpf" in kind:
+            mode = "lpf"
+        else:
+            mode = params.get("mode", "hpf")
+
+        f_start = float(getattr(effect, "start_hz", params.get("start_hz", 30.0)))
+        f_end = float(getattr(effect, "end_hz", params.get("end_hz", 800.0)))
+        q_val = float(params.get("resonance", params.get("resonance_q", 1.0)))
+
+        out[..., s_idx:e_idx] = process_zdf_svf_sweep_numpy(
+            segment, sr=sr, start_cutoff_hz=f_start, end_cutoff_hz=f_end, resonance_q=q_val, mode=mode
+        )
+
+    elif kind in ("reverb_freeze", "fdn_freeze", "spatial_freeze"):
+        freeze_on_s = params.get("freeze_engage_s", params.get("freeze_start_s", getattr(effect, "start_s", 0.0)))
+        freeze_off_s = params.get("freeze_release_s", params.get("freeze_end_s", eff_end))
+        freeze_mode = bool(params.get("freeze_mode", True))
+
+        if freeze_mode and freeze_on_s is not None:
+            local_f_start = max(0, int(round((transition_start_s + float(freeze_on_s) - s_sec) * sr)))
+        else:
+            local_f_start = None
+
+        if freeze_mode and freeze_off_s is not None:
+            local_f_end = max(0, int(round((transition_start_s + float(freeze_off_s) - s_sec) * sr)))
+        else:
+            local_f_end = None
+
+        feedback = float(params.get("feedback", 0.88))
+        wet_mix = float(params.get("wet_mix_start", params.get("wet", 0.55)))
+        dry_mix = float(params.get("dry", 1.0))
+
+        out[..., s_idx:e_idx] = process_fdn_freeze_numpy(
+            segment,
+            sr=sr,
+            freeze_start_sample=local_f_start,
+            freeze_end_sample=local_f_end,
+            feedback_gain=feedback,
+            wet_mix=wet_mix,
+            dry_mix=dry_mix,
+        )
+
+    elif kind == "sidechain_duck" and sidechain_key_audio is not None:
+        key_total = sidechain_key_audio.shape[-1]
+        k_start = min(s_idx, key_total)
+        k_end = min(e_idx, key_total)
+        if k_end > k_start:
+            key_seg = sidechain_key_audio[..., k_start:k_end]
+            if key_seg.shape[-1] < segment.shape[-1]:
+                pad_len = segment.shape[-1] - key_seg.shape[-1]
+                key_seg = np.pad(key_seg, ((0, 0), (0, pad_len)) if key_seg.ndim == 2 else (0, pad_len))
+
+            out[..., s_idx:e_idx] = process_sidechain_compressor_numpy(
+                segment,
+                key_seg,
+                sr=sr,
+                bpm=bpm,
+                attack_ms=float(params.get("attack_ms", 1.5)),
+                release_beat_fraction=float(params.get("release_beats", params.get("release_beat_fraction", 0.25))),
+                threshold_db=float(params.get("threshold_db", -18.0)),
+                ratio=float(params.get("ratio", 4.0)),
+            )
+
+    return out
 
 
 def rendered_duration_s(
@@ -40,6 +149,11 @@ def render_plan(
     """Render a transition plan from full mixes and/or user-provided stems."""
 
     cfg = config or DEFAULT_CONFIG
+    if isinstance(stems_a, dict):
+        stems_a = StemSet(stems=stems_a, source_label="A")
+    if isinstance(stems_b, dict):
+        stems_b = StemSet(stems=stems_b, source_label="B")
+
     validate_plan(plan, cfg, sample_rate=song_a.sample_rate)
 
     tolerance = 1.0 / song_a.sample_rate
@@ -178,15 +292,45 @@ def render_plan(
         offset_frames = int(round(offset_s * sample_rate))
         transition_start_in_audio_s = plan.start_time_s - offset_s
 
+        # Resolve sidechain key audio (Song B drums or mix) if needed
+        key_audio_samples = None
+        has_duck = any(getattr(e, "kind", "").lower() == "sidechain_duck" for e in automation.effects)
+        if has_duck and automation.source == "a":
+            try:
+                b_stems = sources["b"][1]
+                if b_stems and "drums" in b_stems:
+                    raw_key = resolve("b", "drums")
+                else:
+                    raw_key = resolve("b", MIX_STEM)
+                cue_f = int(round(cue_offset_b_s * sample_rate))
+                sliced_key = raw_key.samples[:, cue_f:]
+                start_pad_frames = int(round(plan.start_time_s * sample_rate))
+                key_audio_samples = np.pad(sliced_key, ((0, 0), (start_pad_frames, 0)))
+            except Exception:
+                key_audio_samples = None
+
+        bpm_val = float(plan.metadata.get("tempo_b", plan.metadata.get("tempo_a", 126.0)) or 126.0)
+
         processed = audio_to_process
         for effect in automation.effects:
-            processed = apply_lowpass_sweep(
-                AudioBuffer(processed, audio.sample_rate),
-                effect,
-                transition_start_s=transition_start_in_audio_s,
-                transition_duration_s=plan.duration_s,
-                chunk_samples=cfg.render.effect_chunk_samples,
-            ).samples
+            if effect.kind == "lowpass_sweep":
+                processed = apply_lowpass_sweep(
+                    AudioBuffer(processed, audio.sample_rate),
+                    effect,
+                    transition_start_s=transition_start_in_audio_s,
+                    transition_duration_s=plan.duration_s,
+                    chunk_samples=cfg.render.effect_chunk_samples,
+                ).samples
+            else:
+                processed = apply_effect_spec_to_stem(
+                    processed,
+                    effect,
+                    sr=sample_rate,
+                    bpm=bpm_val,
+                    sidechain_key_audio=key_audio_samples,
+                    transition_start_s=transition_start_in_audio_s,
+                    transition_duration_s=plan.duration_s,
+                )
 
         # Time axis for gain interpolation should be relative to the sliced audio
         local_times = np.arange(audio_to_process.shape[1], dtype=np.float64) / sample_rate
