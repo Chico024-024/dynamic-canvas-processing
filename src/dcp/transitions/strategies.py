@@ -1273,14 +1273,17 @@ class StudioRemixStrategy:
             master_bpm = (tempo_a + tempo_b) * 0.5
             warp_ratio_b = 1.0
 
-        # Bar count allocation: 12 bars (8 build + 4 ghost) or adaptive
-        max_trans_dur = min(context.max_duration_s, context.song_a.duration_s)
-        if context.requested_duration_s > 10.0:
-            desired_bars = max(4, int(round(context.requested_duration_s / effective_bar_s)))
+        # Fully Autonomous Musical Bar Allocation (Decided by the AI Producer, not a slider)
+        if composed_plan is not None:
+            # 16 bars for polyrhythmic pivots & ghost suspensions, 12 bars standard matrix
+            if archetype in ("POLYRHYTHMIC_4_3_PIVOT", "GHOST_WASH_SUSPENSION"):
+                desired_bars = 16
+            else:
+                desired_bars = 12
         else:
             desired_bars = 12
 
-        total_bridge_bars = min(16, max(4, desired_bars))
+        total_bridge_bars = desired_bars
         ghost_bars = max(2, total_bridge_bars // 3)
         lead_in_bars = total_bridge_bars - ghost_bars
         bridge_duration_s = total_bridge_bars * effective_bar_s

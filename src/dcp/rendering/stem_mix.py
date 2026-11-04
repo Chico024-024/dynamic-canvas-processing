@@ -22,12 +22,15 @@ from .dsp_fallback import (
     process_sidechain_compressor_numpy,
     process_fdn_freeze_numpy,
     time_stretch_phase_vocoder_numpy,
+    process_master_bus_glue_numpy,
 )
 from .song_c import (
     generate_noise_riser,
     generate_reverse_crash,
     generate_sub_bass_808,
 )
+from .vocal_chop import generate_vocal_chops
+from .drum_regroove import regroove_drums_half_time
 
 
 def apply_effect_spec_to_stem(
@@ -453,14 +456,35 @@ def render_plan(
         except Exception:
             pass
 
-        # 3. White/Pink Noise Riser during build-up (t_intro -> t_breath)
+        # 4. Syncopated Vocal Chops under ghost resolution (impact -> end)
         try:
-            riser_dur = max(0.4, t_breath_rel - t_intro_rel)
-            riser = generate_noise_riser(duration_s=riser_dur, sr=sample_rate, level_db=-14.0, sidechain_bpm=bpm_val)
-            riser_start = int(round((plan.start_time_s + t_intro_rel) * sample_rate))
-            riser_avail = min(riser.shape[1], total_frames - riser_start)
-            if riser_avail > 0 and riser_start >= 0:
-                output[:, riser_start : riser_start + riser_avail] += riser[:, :riser_avail]
+            a_stems = sources["a"][1]
+            if a_stems and "vocals" in a_stems:
+                raw_voc = a_stems["vocals"].samples
+                res_dur = max(0.5, plan.duration_s - t_impact_rel)
+                chops = generate_vocal_chops(raw_voc, sr=sample_rate, bpm=bpm_val, duration_s=res_dur, level_db=-10.0)
+                chops_avail = min(chops.shape[1], total_frames - impact_frame)
+                if chops_avail > 0 and impact_frame >= 0:
+                    output[:, impact_frame : impact_frame + chops_avail] += chops[:, :chops_avail]
+        except Exception:
+            pass
+
+        # 5. Half-Time Drum Re-grooving pocket during post-impact bridge
+        try:
+            b_stems = sources["b"][1]
+            if b_stems and "drums" in b_stems:
+                raw_drums = b_stems["drums"].samples
+                pocket_dur = min(8.0, max(1.0, plan.duration_s - t_impact_rel))
+                regrooved = regroove_drums_half_time(raw_drums, sr=sample_rate, bpm=bpm_val, duration_s=pocket_dur)
+                pocket_avail = min(regrooved.shape[1], total_frames - impact_frame)
+                if pocket_avail > 0 and impact_frame >= 0:
+                    output[:, impact_frame : impact_frame + pocket_avail] += regrooved[:, :pocket_avail] * 0.45
+        except Exception:
+            pass
+
+        # 6. Apply Master Bus VCA Glue Compressor & Brickwall Limiter
+        try:
+            output = process_master_bus_glue_numpy(output, sr=sample_rate, threshold_db=-12.0, ratio=1.5, ceiling_dbfs=-0.5)
         except Exception:
             pass
 

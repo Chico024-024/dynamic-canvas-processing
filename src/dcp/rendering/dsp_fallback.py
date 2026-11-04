@@ -417,3 +417,74 @@ def time_stretch_phase_vocoder_numpy(
         return res[:1] if audio.ndim == 2 else res[0]
     return res
 
+
+# =============================================================================
+# 5. Master Bus Glue Compressor & Studio Brickwall Limiter
+# =============================================================================
+
+def process_master_bus_glue_numpy(
+    audio: np.ndarray,
+    sr: int,
+    threshold_db: float = -12.0,
+    ratio: float = 1.5,
+    attack_ms: float = 30.0,
+    release_ms: float = 100.0,
+    ceiling_dbfs: float = -0.5,
+) -> np.ndarray:
+    """
+    Classic SSL-style 2-bus VCA glue compressor with a brickwall soft limiter.
+    Provides cohesion and punch to the rendered transition bridge without clipping.
+    """
+    stereo, was_mono = _ensure_stereo(audio)
+    n_samples = stereo.shape[1]
+    if n_samples == 0:
+        return audio.copy()
+
+    # Instantaneous peak detector with stereo linking
+    peak = np.maximum(np.abs(stereo[0]), np.abs(stereo[1]))
+
+    # IIR envelope detector for attack and release
+    att_alpha = float(np.exp(-1.0 / (max(0.001, attack_ms * 0.001) * sr)))
+    rel_alpha = float(np.exp(-1.0 / (max(0.010, release_ms * 0.001) * sr)))
+
+    # Process envelope at 32-sample block rate
+    step = 32
+    n_blocks = int(np.ceil(n_samples / step))
+    padded = np.pad(peak, (0, n_blocks * step - n_samples), mode="edge")
+    block_peaks = np.max(padded.reshape(n_blocks, step), axis=1)
+
+    env_block = np.empty_like(block_peaks)
+    state = 0.0
+    for i in range(n_blocks):
+        pk = float(block_peaks[i])
+        alpha = att_alpha if pk > state else rel_alpha
+        state = alpha * state + (1.0 - alpha) * pk
+        env_block[i] = state
+
+    env = np.repeat(env_block, step)[:n_samples]
+
+    # Soft-knee VCA gain computer
+    env_db = 20.0 * np.log10(np.maximum(env, 1e-9))
+    overshoot = env_db - threshold_db
+    slope = (1.0 / max(1.0, ratio)) - 1.0
+
+    gain_red_db = np.zeros_like(overshoot)
+    above = overshoot > 0.0
+    gain_red_db[above] = slope * overshoot[above]
+
+    comp_gain = np.power(10.0, gain_red_db / 20.0).astype(np.float32)
+
+    glued = stereo * comp_gain[np.newaxis, :]
+
+    # Brickwall soft limiter ceiling
+    ceiling_linear = float(np.power(10.0, ceiling_dbfs / 20.0))
+    max_val = np.max(np.abs(glued))
+    if max_val > ceiling_linear:
+        # Soft tanh saturation above ceiling
+        glued = ceiling_linear * np.tanh(glued / ceiling_linear)
+
+    if was_mono:
+        return glued[:1] if audio.ndim == 2 else glued[0]
+    return glued
+
+

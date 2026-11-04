@@ -111,7 +111,19 @@
 
         // Strategy selection
         document.getElementById('strategy-select').addEventListener('change', (e) => {
-            // Strategy changed - could update UI
+            const isRemix = e.target.value === 'studio_remix';
+            const durationInput = document.getElementById('transition-duration');
+            const durationVal = document.getElementById('duration-value');
+            if (isRemix) {
+                durationInput.disabled = true;
+                durationInput.dataset.previousValue = durationInput.value;
+                durationVal.textContent = "Autonomous (AI Decides)";
+                durationVal.style.color = "var(--color-accent-amber)";
+            } else {
+                durationInput.disabled = false;
+                durationVal.style.color = "";
+                durationVal.textContent = `${parseFloat(durationInput.value).toFixed(1)}s`;
+            }
         });
 
         // Transition duration

@@ -8,11 +8,11 @@
 
 | Metric | Status | Details |
 | :--- | :--- | :--- |
-| **Test Suite** | **100% Green** | 285 passed, 8 skipped (optional librosa/torch), 0 failed |
+| **Test Suite** | **100% Green** | 292 passed, 8 skipped (optional librosa/torch), 0 failed |
 | **Core Architecture** | **Hybrid Python + C++20** | Python MIR & Planning + Zero-Allocation C++20 DSP Kernel (with pure NumPy fallback) |
 | **Active Paradigm** | **"Song C" Studio Remix** | Rejecting mechanical DJ crossfaders; composing an 8–16 bar bespoke DAW-grade remix bridge |
 | **Repository State** | **Working Tree Clean** | Zero-dependency DSP stem splitter active, Web UI & CLI auto-decompose enabled |
-| **Last Updated** | **2026-11-04 10:25 UTC** | Antigravity |
+| **Last Updated** | **2026-11-04 12:00 UTC** | Antigravity |
 
 ---
 
@@ -129,6 +129,28 @@ flowchart TD
   - **Automatic Web UI & CLI Decomposition**: Whenever Studio Remix is selected and stems are not supplied, DCP automatically decomposes the tracks on the fly and renders the full 4-stem "Song C" Studio Remix (TPT ZDF sweeps, FDN freeze, sidechain ducking).
   - **Robust Anchor Synthesis**: If downbeat confidence is low, `StudioRemixStrategy` synthesizes valid 12-bar phrase anchors rather than punting back to a conservative crossfade.
   - **Verification**: 10 passed in `tests/test_ui_server.py`. Total suite: **285 passed, 0 failed, 8 skipped**.
+
+### [COMPLETED] Step 8: True "Song C" Producer Matrix, Generative Assets & Ghost Freeze Bus
+- **Files**: [`src/dcp/transitions/strategies.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/transitions/strategies.py), [`src/dcp/rendering/stem_mix.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/rendering/stem_mix.py), [`src/dcp/rendering/song_c.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/rendering/song_c.py), [`src/dcp/transitions/musical_ir.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/transitions/musical_ir.py), [`tests/test_composer_and_telemetry.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/tests/test_composer_and_telemetry.py)
+- **Assignee**: Antigravity
+- **Result**:
+  - Eliminated the artificial 2-bar lead-in lock; anchored $T_{\text{impact}}$ to downbeat boundary with true 12-to-16-bar matrix.
+  - Published `cue_offset_b_s` to transition metadata, aligning Song B's drop impact exactly with $T_{\text{impact}}$ in the output timeline.
+  - Gated Song B drums and bass to `floor_db` during $T_{\text{breath}} \to T_{\text{impact}}$ for a true visceral pre-drop vacuum silence.
+  - Separated FDN reverb freeze return from the dry stem gain chain so Song A's singing tail stays audible across the post-impact bridge.
+  - Synthesized generative DAW assets: exponential noise riser sweep, reverse crash cymbal swell, and 808 sub-bass drop hit.
+  - Integrated harmonic chroma and sub-bass root pitch class extraction directly from stems.
+  - Verification: 12 tests in `tests/test_composer_and_telemetry.py`. Total suite: **288 passed, 0 failed, 8 skipped**.
+
+### [COMPLETED] Step 9: Autonomous Duration, Half-Time Drum Re-Groover, Vocal Chops & Master Glue Compressor
+- **Files**: [`src/dcp/rendering/drum_regroove.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/rendering/drum_regroove.py), [`src/dcp/rendering/vocal_chop.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/rendering/vocal_chop.py), [`src/dcp/rendering/dsp_fallback.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/rendering/dsp_fallback.py), [`src/dcp/rendering/stem_mix.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/rendering/stem_mix.py), [`src/dcp/transitions/strategies.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/transitions/strategies.py), [`src/dcp/ui_server.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/ui_server.py), [`src/dcp/static/app.js`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/static/app.js), [`tests/test_drum_regroove_and_vocal_chop.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/tests/test_drum_regroove_and_vocal_chop.py)
+- **Assignee**: Antigravity
+- **Result**:
+  - **Autonomous Transition Duration**: Removed manual slider constraint; duration is strictly derived from musical bar length ($d_{\text{eff}} = 2 / (1/d_A + 1/d_B)$) and phrase structure (12–16 bars). UI slider shows `"Autonomous (AI Decides)"`.
+  - **Half-Time Drum Re-Groover**: Transient onset detector and half-time pocket reconstruction for post-impact bridge.
+  - **Vocal Chop Sampler**: 16th-note windowed vocal slicing with rhythmic stutter patterns and quarter-note kick ducking.
+  - **Master Bus Glue Compressor & Soft Limiter**: SSL-style 2-bus VCA compressor (1.5:1 ratio, 30ms attack, 100ms release) and brickwall limiter (-0.5 dBFS ceiling).
+  - **Full Test Suite**: **292 passed, 0 failed, 8 skipped in 76.8s (100% green)**.
 
 ---
 

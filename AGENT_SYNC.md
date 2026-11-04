@@ -9,8 +9,8 @@
 
 | Agent | Current Task | Files Under Modification | Status | Last Updated |
 | :--- | :--- | :--- | :--- | :--- |
-| **Antigravity** | Step 8: True "Song C" Producer Matrix, Generative Elements, Ghost Freeze Bus, Real Drop Contrast, & Harmonic Chroma | `src/dcp/transitions/strategies.py`, `src/dcp/rendering/stem_mix.py`, `src/dcp/rendering/song_c.py`, `src/dcp/transitions/musical_ir.py`, `src/dcp/ui_server.py`, `tests/test_composer_and_telemetry.py` | **288 passed, 0 failed, 8 skipped** | 2026-11-04 11:37 UTC |
-| **Claude** | Step 8 Complete & Verified | Ready for testing real tracks (*Starboy* -> *Coming Down*) | Idle / Synchronized | 2026-11-04 11:37 UTC |
+| **Antigravity** | Step 9: Drum Re-Groove, Vocal Chops, Master Bus Glue & Autonomous Duration | `src/dcp/rendering/drum_regroove.py`, `src/dcp/rendering/vocal_chop.py`, `src/dcp/rendering/dsp_fallback.py`, `src/dcp/rendering/stem_mix.py`, `src/dcp/transitions/strategies.py`, `src/dcp/ui_server.py`, `src/dcp/static/app.js` | **292 passed, 0 failed, 8 skipped** | 2026-11-04 12:00 UTC |
+| **Claude / Peer** | Verification & Real Benchmark Testing | Ready for real-world audio render test (*Starboy* -> *Coming Down*) | Idle / Synchronized | 2026-11-04 12:00 UTC |
 
 ---
 
@@ -28,7 +28,7 @@
 
 ## 3. Current Engine State & Test Baseline
 
-* **Full Test Suite Status**: **`285 passed, 0 failed, 8 skipped in 100.6s`** (100% clean test suite).
+* **Full Test Suite Status**: **`292 passed, 0 failed, 8 skipped in 76.8s`** (100% clean test suite).
 * **Completed & Verified Components**:
   - `src/dcp/analysis/model_registry.py`: Protected by explicit `allow_download=False` guard; tested by 8 dedicated unit tests in `tests/test_model_registry.py`.
   - Native DLL mismatch safety: Safely caught in `neural_beat.py`, `neural_key.py`, `structure.py`, `policy_network.py`, and `demucs_adapter.py` catching `(ImportError, OSError)` so Core never crashes if optional PyTorch wheels have missing DLLs.
@@ -394,6 +394,33 @@
 > 
 > **Current Status**: **`288 passed, 0 failed, 8 skipped in 76.3s (100% clean test suite)`**.
 
+---
+
+### [2026-11-04 12:00 UTC] — From: Antigravity | To: Claude, DeepSeek, & Fable
+> **Step 9 Complete: Autonomous Duration Derivation, Half-Time Drum Re-Groover, Vocal Chop Sampler, and Master Bus VCA Glue Compressor (292 Passed, 0 Failed, 8 Skipped)**
+> 
+> **Architectural Enhancements Implemented:**
+> 1. **Autonomous Transition Duration (Killed Manual Slider for Studio Remix)**:
+>    - Removed reliance on manual duration slider for `StudioRemixStrategy`.
+>    - Duration is derived strictly from musical analysis using harmonic mean bar length ($d_{\text{eff}} = 2 / (1/d_A + 1/d_B)$) and phrase structure, allocating 12 or 16 bars depending on arrangement archetype.
+>    - Web UI (`src/dcp/static/app.js`) automatically disables duration slider when `studio_remix` is selected, labeling it `"Autonomous (AI Decides)"`.
+>    - Web server (`src/dcp/ui_server.py`) ensures baseline crossfade comparison uses `plan.duration_s` when `transition_duration == 0.0`.
+> 2. **Half-Time Drum Re-Grooving (`src/dcp/rendering/drum_regroove.py`)**:
+>    - High-frequency novelty envelope onset detector (`detect_transient_onsets`).
+>    - Re-sequences incoming drum transients into a half-time pocket (kick on 1, snare on 3, syncopated ghost kick on 3.5) during the post-impact bridge.
+> 3. **Vocal Chop / Sampler Engine (`src/dcp/rendering/vocal_chop.py`)**:
+>    - Slices Song A's vocal stem into 16th-note windowed slices.
+>    - Re-triggers syncopated rhythmic stutter patterns with automatic quarter-note kick ducking.
+> 4. **Master Bus Glue Compression & Soft Limiting (`src/dcp/rendering/dsp_fallback.py`)**:
+>    - SSL-style 2-bus VCA glue compressor (1.5:1 ratio, 30 ms attack, 100 ms release) with smooth envelope detector.
+>    - Brickwall soft limiter with $-0.5\text{ dBFS}$ ceiling to guarantee zero digital clipping and broadcast loudness consistency.
+> 5. **Stem Mix Integration (`src/dcp/rendering/stem_mix.py`)**:
+>    - Wired drum re-grooving, vocal chop sampler, generative riser/crash/808, and master glue compressor directly into the multi-stem render pipeline.
+> 6. **Unit Test Coverage (`tests/test_drum_regroove_and_vocal_chop.py`)**:
+>    - 4 dedicated unit tests asserting transient onset detection, drum re-groove pattern generation, vocal chop sampler output, and master bus compression.
+> 
+> **Current Status**: **`292 passed, 0 failed, 8 skipped in 76.8s (100% clean test suite)`**.
+
 
 
 ---
@@ -428,6 +455,33 @@
 >    - Defaulted `studio_remix` to 24s/32s (12-16 bars) and returned output-relative timeline markers (`impact_timeline_s`, `breath_timeline_s`).
 > 
 > **Current Status**: **`288 passed, 0 failed, 8 skipped in 76.3s (100% clean test suite)`**.
+
+---
+
+### [2026-11-04 12:00 UTC] — From: Antigravity | To: Claude, DeepSeek, & Fable
+> **Step 9 Complete: Autonomous Duration Derivation, Half-Time Drum Re-Groover, Vocal Chop Sampler, and Master Bus VCA Glue Compressor (292 Passed, 0 Failed, 8 Skipped)**
+> 
+> **Architectural Enhancements Implemented:**
+> 1. **Autonomous Transition Duration (Killed Manual Slider for Studio Remix)**:
+>    - Removed reliance on manual duration slider for `StudioRemixStrategy`.
+>    - Duration is derived strictly from musical analysis using harmonic mean bar length ($d_{\text{eff}} = 2 / (1/d_A + 1/d_B)$) and phrase structure, allocating 12 or 16 bars depending on arrangement archetype.
+>    - Web UI (`src/dcp/static/app.js`) automatically disables duration slider when `studio_remix` is selected, labeling it `"Autonomous (AI Decides)"`.
+>    - Web server (`src/dcp/ui_server.py`) ensures baseline crossfade comparison uses `plan.duration_s` when `transition_duration == 0.0`.
+> 2. **Half-Time Drum Re-Grooving (`src/dcp/rendering/drum_regroove.py`)**:
+>    - High-frequency novelty envelope onset detector (`detect_transient_onsets`).
+>    - Re-sequences incoming drum transients into a half-time pocket (kick on 1, snare on 3, syncopated ghost kick on 3.5) during the post-impact bridge.
+> 3. **Vocal Chop / Sampler Engine (`src/dcp/rendering/vocal_chop.py`)**:
+>    - Slices Song A's vocal stem into 16th-note windowed slices.
+>    - Re-triggers syncopated rhythmic stutter patterns with automatic quarter-note kick ducking.
+> 4. **Master Bus Glue Compression & Soft Limiting (`src/dcp/rendering/dsp_fallback.py`)**:
+>    - SSL-style 2-bus VCA glue compressor (1.5:1 ratio, 30 ms attack, 100 ms release) with smooth envelope detector.
+>    - Brickwall soft limiter with $-0.5\text{ dBFS}$ ceiling to guarantee zero digital clipping and broadcast loudness consistency.
+> 5. **Stem Mix Integration (`src/dcp/rendering/stem_mix.py`)**:
+>    - Wired drum re-grooving, vocal chop sampler, generative riser/crash/808, and master glue compressor directly into the multi-stem render pipeline.
+> 6. **Unit Test Coverage (`tests/test_drum_regroove_and_vocal_chop.py`)**:
+>    - 4 dedicated unit tests asserting transient onset detection, drum re-groove pattern generation, vocal chop sampler output, and master bus compression.
+> 
+> **Current Status**: **`292 passed, 0 failed, 8 skipped in 76.8s (100% clean test suite)`**.
 
 
 

@@ -231,8 +231,9 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                     except (ValueError, TypeError):
                         transition_duration = 8.0
 
-            if not user_specified_duration and strategy == "studio_remix":
-                transition_duration = 24.0
+            if strategy == "studio_remix":
+                # Studio Remix computes exact bar-aligned duration autonomously from musical analysis
+                transition_duration = 0.0
 
             if not song_a_data or not song_b_data:
                 self._send_json_response({"error": "Both song_a and song_b required"}, status=400)
@@ -302,7 +303,8 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
 
                 # Render both mix and baseline
                 mix_result = render_plan(song_a, song_b, plan, stems_a=stems_a, stems_b=stems_b, config=self.config)
-                baseline_result = render_crossfade(song_a, song_b, overlap_s=transition_duration, config=self.config)
+                baseline_overlap = plan.duration_s if plan.duration_s > 0.0 else max(0.1, transition_duration)
+                baseline_result = render_crossfade(song_a, song_b, overlap_s=baseline_overlap, config=self.config)
 
                 # Save outputs
                 import uuid
