@@ -8,11 +8,11 @@
 
 | Metric | Status | Details |
 | :--- | :--- | :--- |
-| **Test Suite** | **100% Green** | 284 passed, 8 skipped (optional librosa/torch), 0 failed |
+| **Test Suite** | **100% Green** | 285 passed, 8 skipped (optional librosa/torch), 0 failed |
 | **Core Architecture** | **Hybrid Python + C++20** | Python MIR & Planning + Zero-Allocation C++20 DSP Kernel (with pure NumPy fallback) |
 | **Active Paradigm** | **"Song C" Studio Remix** | Rejecting mechanical DJ crossfaders; composing an 8–16 bar bespoke DAW-grade remix bridge |
-| **Repository State** | **Working Tree Clean** | All tests passing green, Layer 2 Musical IR, Layer 3 Composer, Layer 5 Telemetry wired end-to-end |
-| **Last Updated** | **2026-11-04 10:00 UTC** | Antigravity |
+| **Repository State** | **Working Tree Clean** | Zero-dependency DSP stem splitter active, Web UI & CLI auto-decompose enabled |
+| **Last Updated** | **2026-11-04 10:25 UTC** | Antigravity |
 
 ---
 
@@ -119,6 +119,16 @@ flowchart TD
   - **Tolerant Stem Mix Renderer**: `render_plan()` now transparently accepts raw dictionary stem mappings as well as `StemSet` objects.
   - **Live Audio Telemetry in UI Server**: `/api/mix` calculates and returns Layer 5 audio quality metrics (True Peak dBFS, phase correlation, sub-bass collision %, studio QC pass/fail) in the JSON payload.
   - **Verification**: 9 dedicated tests in `tests/test_composer_and_telemetry.py` all passing. Total suite: **284 passed, 0 failed, 8 skipped**.
+
+### [COMPLETED] Step 7: Zero-Dependency DSP Stem Splitter & Automatic UI/CLI Decomposition
+- **Files**: [`src/dcp/stems/dsp_splitter.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/stems/dsp_splitter.py), [`src/dcp/stems/__init__.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/stems/__init__.py), [`src/dcp/ui_server.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/ui_server.py), [`src/dcp/cli.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/src/dcp/cli.py), [`tests/test_ui_server.py`](file:///c:/Users/rmcbs/OneDrive/Documents/DCP/tests/test_ui_server.py)
+- **Assignee**: Antigravity
+- **Result**:
+  - **Identified Root Cause of Previous Tests**: Demucs was not installed, and `ui_server.py` had hardcoded `stems_a=None, stems_b=None`. Consequently, `StudioRemixStrategy` was silently dropping into `_conservative_plan` (a plain crossfade) whenever real songs were uploaded!
+  - **Zero-Dependency Complementary DSP Splitter**: Implemented `decompose_audio_to_stemset()` using zero-phase Butterworth filters (bass $< 180\text{ Hz}$, vocal midrange $180\text{--}3500\text{ Hz}$ center channel, percussive transients for drums, and harmonic residual for other). Guarantees $\sum \text{stems} \equiv \text{mix}$ with 32-bit float bit-exact precision ($< 10^{-7}$ diff).
+  - **Automatic Web UI & CLI Decomposition**: Whenever Studio Remix is selected and stems are not supplied, DCP automatically decomposes the tracks on the fly and renders the full 4-stem "Song C" Studio Remix (TPT ZDF sweeps, FDN freeze, sidechain ducking).
+  - **Robust Anchor Synthesis**: If downbeat confidence is low, `StudioRemixStrategy` synthesizes valid 12-bar phrase anchors rather than punting back to a conservative crossfade.
+  - **Verification**: 10 passed in `tests/test_ui_server.py`. Total suite: **285 passed, 0 failed, 8 skipped**.
 
 ---
 

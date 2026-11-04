@@ -246,6 +246,11 @@ def _cmd_render(args: argparse.Namespace) -> int:
         if stems_b is None:
             print("Separating Song B stems using Demucs...")
             stems_b = sep.separate(song_b)
+    elif getattr(args, "strategy", None) == "studio_remix" and stems_a is None and stems_b is None:
+        from .stems.dsp_splitter import decompose_audio_to_stemset
+        print("Auto-decomposing tracks into 4-stem channels for Studio Remix...")
+        stems_a = decompose_audio_to_stemset(song_a, label="A")
+        stems_b = decompose_audio_to_stemset(song_b, label="B")
 
     analysis_a = analyze_track_with_backend(
         song_a, config.analysis, backend=args.analyzer

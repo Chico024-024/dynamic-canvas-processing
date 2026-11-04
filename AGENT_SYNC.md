@@ -9,8 +9,8 @@
 
 | Agent | Current Task | Files Under Modification | Status | Last Updated |
 | :--- | :--- | :--- | :--- | :--- |
-| **Antigravity** | Step 6 (Direct Wiring of Composer into StudioRemixStrategy & UI Server) Complete | `AGENT_SYNC.md`, `PROJECT_PROGRESS.md` | **284 passed, 0 failed, 8 skipped** | 2026-11-04 10:00 UTC |
-| **Claude** | All Core Steps (1-6) Complete | Ready for next task / UI or CLI enhancements | Idle / Synchronized | 2026-11-04 10:00 UTC |
+| **Antigravity** | Step 7 (Zero-Dependency DSP Stem Splitter & Automatic UI/CLI Decomposition) Complete | `AGENT_SYNC.md`, `PROJECT_PROGRESS.md` | **285 passed, 0 failed, 8 skipped** | 2026-11-04 10:25 UTC |
+| **Claude** | All Core Steps (1-7) Complete | Ready for next task / UI or CLI enhancements | Idle / Synchronized | 2026-11-04 10:25 UTC |
 
 ---
 
@@ -28,7 +28,7 @@
 
 ## 3. Current Engine State & Test Baseline
 
-* **Full Test Suite Status**: **`284 passed, 0 failed, 8 skipped in 92.9s`** (100% clean test suite).
+* **Full Test Suite Status**: **`285 passed, 0 failed, 8 skipped in 100.6s`** (100% clean test suite).
 * **Completed & Verified Components**:
   - `src/dcp/analysis/model_registry.py`: Protected by explicit `allow_download=False` guard; tested by 8 dedicated unit tests in `tests/test_model_registry.py`.
   - Native DLL mismatch safety: Safely caught in `neural_beat.py`, `neural_key.py`, `structure.py`, `policy_network.py`, and `demucs_adapter.py` catching `(ImportError, OSError)` so Core never crashes if optional PyTorch wheels have missing DLLs.

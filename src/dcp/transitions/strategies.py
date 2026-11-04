@@ -1202,45 +1202,56 @@ class StudioRemixStrategy:
                 bridge_bars=8,
             )
             if not anchor_result.success:
-                return _conservative_plan(
-                    context,
-                    requested_strategy=context.requested_strategy,
-                    extra_warnings=[
-                        f"Studio Remix anchor selection failed: {anchor_result.fallback_reason}. "
-                        "Conservative fallback used."
-                    ],
-                    prefix_reasoning=(
-                        "Could not identify suitable launchpad and impact anchors for "
-                        "the Studio Remix bridge. Falling back to conservative crossfade."
-                    ),
+                warnings.append(
+                    f"Studio Remix heuristic anchors unavailable ({anchor_result.fallback_reason}); "
+                    "synthesizing standard 12-bar Producer Matrix anchors."
                 )
-            archetype = "VACUUM_BREATH_DROP"
-            transition_mode = "CONTINUOUS_TEMPO_WARP"
-            feasibility_score = anchor_result.confidence
-            composer_rationale = "Phrase-aligned heuristic launchpad selection."
-            launchpad_a = anchor_result.launchpad_a_s
-            impact_b = anchor_result.impact_b_s
-            breath_start = anchor_result.breath_window_start_s
-            breath_end = anchor_result.breath_window_end_s
-            bridge_start_a = anchor_result.bridge_start_a_s
-            lead_in_bars = anchor_result.lead_in_bars
-            tempo_a = anchor_result.tempo_a_bpm or context.analysis_a.tempo_bpm
-            tempo_b = anchor_result.tempo_b_bpm or context.analysis_b.tempo_bpm
+                tempo_a = context.analysis_a.tempo_bpm or 120.0
+                tempo_b = context.analysis_b.tempo_bpm or 120.0
+                beat_duration_a = 60.0 / tempo_a
+                beat_duration_b = 60.0 / tempo_b
+                bar_duration_a = beat_duration_a * 4.0
+                bar_duration_b = beat_duration_b * 4.0
+                lead_in_bars = 2
+                launchpad_a = max(0.0, context.song_a.duration_s - 4.0 * bar_duration_a)
+                impact_b = min(context.song_b.duration_s * 0.35, 4.0 * bar_duration_b)
+                breath_start = max(0.0, impact_b - 0.5 * bar_duration_b)
+                breath_end = impact_b
+                bridge_start_a = max(0.0, launchpad_a - lead_in_bars * bar_duration_a)
+                archetype = "VACUUM_BREATH_DROP"
+                transition_mode = "CONTINUOUS_TEMPO_WARP"
+                feasibility_score = 0.70
+                composer_rationale = f"Synthesized phrase anchors after {anchor_result.fallback_reason}."
+                breath_beats = 2
+                anchor_conf = 0.70
+            else:
+                archetype = "VACUUM_BREATH_DROP"
+                transition_mode = "CONTINUOUS_TEMPO_WARP"
+                feasibility_score = anchor_result.confidence
+                composer_rationale = "Phrase-aligned heuristic launchpad selection."
+                launchpad_a = anchor_result.launchpad_a_s
+                impact_b = anchor_result.impact_b_s
+                breath_start = anchor_result.breath_window_start_s
+                breath_end = anchor_result.breath_window_end_s
+                bridge_start_a = anchor_result.bridge_start_a_s
+                lead_in_bars = anchor_result.lead_in_bars
+                tempo_a = anchor_result.tempo_a_bpm or context.analysis_a.tempo_bpm
+                tempo_b = anchor_result.tempo_b_bpm or context.analysis_b.tempo_bpm
 
-            if tempo_a is None or tempo_b is None:
-                return _conservative_plan(
-                    context,
-                    requested_strategy=context.requested_strategy,
-                    extra_warnings=["Tempo unavailable for Studio Remix timing."],
-                    prefix_reasoning="Tempo detection failed for one or both tracks.",
-                )
+                if tempo_a is None or tempo_b is None:
+                    return _conservative_plan(
+                        context,
+                        requested_strategy=context.requested_strategy,
+                        extra_warnings=["Tempo unavailable for Studio Remix timing."],
+                        prefix_reasoning="Tempo detection failed for one or both tracks.",
+                    )
 
-            beat_duration_a = 60.0 / tempo_a
-            beat_duration_b = 60.0 / tempo_b
-            bar_duration_a = beat_duration_a * 4.0
-            bar_duration_b = beat_duration_b * 4.0
-            breath_beats = 2 if breath_end > breath_start else 0
-            anchor_conf = anchor_result.confidence
+                beat_duration_a = 60.0 / tempo_a
+                beat_duration_b = 60.0 / tempo_b
+                bar_duration_a = beat_duration_a * 4.0
+                bar_duration_b = beat_duration_b * 4.0
+                breath_beats = 2 if breath_end > breath_start else 0
+                anchor_conf = anchor_result.confidence
 
         # The bridge duration: 8 bars (bridge) + 4 bars (ghost resolution) = 12 bars
         bridge_bars = 8

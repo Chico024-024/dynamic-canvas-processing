@@ -265,6 +265,97 @@ class TestUIServer:
                     assert "duration_s" in res_json
                     assert "waveform_a" in res_json
                     assert "waveform_b" in res_json
+                    assert "telemetry" in res_json
+            finally:
+                server.shutdown()
+                thread.join(timeout=1)
+
+    def test_api_mix_studio_remix_auto_decomposes(self):
+        """Test /api/mix with strategy=studio_remix automatically decomposes and executes Studio Remix."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            static_dir = Path(tmpdir) / "static"
+            static_dir.mkdir()
+            output_dir = Path(tmpdir) / "output"
+            output_dir.mkdir()
+            (static_dir / "index.html").write_text("<html><body>DCP Studio</body></html>")
+
+            from dcp.ui_server import create_server
+            import threading
+            import time
+            import urllib.request
+            import json
+            import wave
+            import struct
+            import math
+
+            server = create_server(host="127.0.0.1", port=0, static_dir=static_dir, output_dir=output_dir)
+            port = server.server_address[1]
+
+            def run_server():
+                server.serve_forever()
+
+            thread = threading.Thread(target=run_server, daemon=True)
+            thread.start()
+            time.sleep(0.5)
+
+            try:
+                sample_rate = 22050
+                duration = 3.0
+                n_samples = int(sample_rate * duration)
+                data_a = b"".join(
+                    struct.pack("<h", int(8000 * math.sin(2 * math.pi * 100 * i / sample_rate)))
+                    for i in range(n_samples)
+                )
+                data_b = b"".join(
+                    struct.pack("<h", int(8000 * math.sin(2 * math.pi * 200 * i / sample_rate)))
+                    for i in range(n_samples)
+                )
+
+                file_a = Path(tmpdir) / "a.wav"
+                with wave.open(str(file_a), "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(sample_rate)
+                    wf.writeframes(data_a)
+
+                file_b = Path(tmpdir) / "b.wav"
+                with wave.open(str(file_b), "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(sample_rate)
+                    wf.writeframes(data_b)
+
+                boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
+                body = (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="song_a"; filename="a.wav"\r\n'
+                    f"Content-Type: audio/wav\r\n\r\n"
+                ).encode("utf-8") + file_a.read_bytes() + (
+                    f"\r\n--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="song_b"; filename="b.wav"\r\n'
+                    f"Content-Type: audio/wav\r\n\r\n"
+                ).encode("utf-8") + file_b.read_bytes() + (
+                    f"\r\n--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="strategy"\r\n\r\n'
+                    f"studio_remix\r\n"
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="transition_duration"\r\n\r\n'
+                    f"1.5\r\n"
+                    f"--{boundary}--\r\n"
+                ).encode("utf-8")
+
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/mix",
+                    data=body,
+                    headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+                )
+                with urllib.request.urlopen(req) as response:
+                    res_json = json.loads(response.read().decode("utf-8"))
+                    assert "mix_id" in res_json
+                    assert "metadata" in res_json
+                    assert res_json["metadata"].get("studio_remix") is True
+                    assert "telemetry" in res_json
+                    assert "passes_studio_qc" in res_json["telemetry"]
             finally:
                 server.shutdown()
                 thread.join(timeout=1)

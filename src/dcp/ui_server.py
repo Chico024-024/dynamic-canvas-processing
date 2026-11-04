@@ -264,12 +264,20 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                 analysis_a = analyze_track_with_backend(song_a, self.config.analysis, backend="auto")
                 analysis_b = analyze_track_with_backend(song_b, self.config.analysis, backend="auto")
 
+                # If Studio Remix strategy is chosen, decompose into 4 stems on-the-fly
+                stems_a = None
+                stems_b = None
+                if strategy == "studio_remix":
+                    from .stems.dsp_splitter import decompose_audio_to_stemset
+                    stems_a = decompose_audio_to_stemset(song_a, label="A")
+                    stems_b = decompose_audio_to_stemset(song_b, label="B")
+
                 # Build transition context
                 context = TransitionContext(
                     song_a=song_a,
                     song_b=song_b,
-                    stems_a=None,
-                    stems_b=None,
+                    stems_a=stems_a,
+                    stems_b=stems_b,
                     analysis_a=analysis_a,
                     analysis_b=analysis_b,
                     requested_duration_s=transition_duration,
@@ -288,7 +296,7 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                 plan = strategy_obj.plan(context)
 
                 # Render both mix and baseline
-                mix_result = render_plan(song_a, song_b, plan, stems_a=None, stems_b=None, config=self.config)
+                mix_result = render_plan(song_a, song_b, plan, stems_a=stems_a, stems_b=stems_b, config=self.config)
                 baseline_result = render_crossfade(song_a, song_b, overlap_s=transition_duration, config=self.config)
 
                 # Save outputs

@@ -15,9 +15,12 @@ from scipy import signal
 
 
 def _ensure_stereo(audio: np.ndarray) -> tuple[np.ndarray, bool]:
-    """Converts (N,) or (2, N) or (N, 2) to contiguous float32 (2, N)."""
+    """Converts (N,) or (1, N) or (2, N) or (N, 2) to contiguous float32 (2, N)."""
     if audio.ndim == 1:
         stereo = np.stack([audio, audio], axis=0).astype(np.float32, copy=True)
+        return np.ascontiguousarray(stereo), True
+    if audio.ndim == 2 and audio.shape[0] == 1:
+        stereo = np.vstack([audio[0], audio[0]]).astype(np.float32, copy=True)
         return np.ascontiguousarray(stereo), True
     if audio.shape[0] == 2:
         return np.ascontiguousarray(audio, dtype=np.float32), False
@@ -100,7 +103,9 @@ def process_zdf_svf_sweep_numpy(
         else:
             out[:, s0:s1] = y1.astype(np.float32)
 
-    return out[0] if was_mono else out
+    if was_mono:
+        return out[:1] if audio.ndim == 2 else out[0]
+    return out
 
 
 # =============================================================================
@@ -178,7 +183,9 @@ def process_sidechain_compressor_numpy(
 
     out = target_st.copy()
     out[:, :n_samples] *= linear_gain[np.newaxis, :]
-    return out[0] if was_mono else out
+    if was_mono:
+        return out[:1] if target_audio.ndim == 2 else out[0]
+    return out
 
 
 # =============================================================================
@@ -307,7 +314,9 @@ def process_fdn_freeze_numpy(
         out[0, s0:s1] = xL * dry_mix + wet_L * wet_mix
         out[1, s0:s1] = xR * dry_mix + wet_R * wet_mix
 
-    return out[0].astype(np.float32) if was_mono else out.astype(np.float32)
+    if was_mono:
+        return out[:1].astype(np.float32) if audio.ndim == 2 else out[0].astype(np.float32)
+    return out.astype(np.float32)
 
 
 # =============================================================================
@@ -404,5 +413,7 @@ def time_stretch_phase_vocoder_numpy(
 
     min_len = min(len(out_channels[0]), len(out_channels[1]))
     res = np.vstack([out_channels[0][:min_len], out_channels[1][:min_len]])
-    return res[0] if was_mono else res
+    if was_mono:
+        return res[:1] if audio.ndim == 2 else res[0]
+    return res
 
