@@ -13,7 +13,7 @@ from ..models import (
     RenderError,
     StemSet,
 )
-from ..transitions.plan import StemAutomation, TransitionPlan, validate_plan
+from ..transitions.plan import EffectSpec, StemAutomation, TransitionPlan, validate_plan
 from ..transitions.curves import interpolate_gain
 from .common import RenderResult, add_unique_note, finalize_output
 from .effects import apply_lowpass_sweep
@@ -22,6 +22,11 @@ from .dsp_fallback import (
     process_sidechain_compressor_numpy,
     process_fdn_freeze_numpy,
     time_stretch_phase_vocoder_numpy,
+)
+from .song_c import (
+    generate_noise_riser,
+    generate_reverse_crash,
+    generate_sub_bass_808,
 )
 
 
@@ -124,6 +129,34 @@ def apply_effect_spec_to_stem(
                 threshold_db=float(params.get("threshold_db", -18.0)),
                 ratio=float(params.get("ratio", 4.0)),
             )
+
+    elif kind == "stereo_width":
+        w_start = float(params.get("width_start", 1.0))
+        w_end = float(params.get("width_end", 1.8))
+        if segment.shape[0] == 2:
+            seg_len = segment.shape[1]
+            w_traj = np.linspace(w_start, w_end, seg_len, dtype=np.float32)
+            mid = 0.5 * (segment[0] + segment[1])
+            side = 0.5 * (segment[0] - segment[1])
+            out[0, s_idx:e_idx] = mid + side * w_traj
+            out[1, s_idx:e_idx] = mid - side * w_traj
+
+    elif kind == "dub_delay_send":
+        delay_beats = float(params.get("delay_note", 0.75))
+        feedback = float(params.get("feedback", 0.45))
+        send_lvl = float(np.power(10.0, float(params.get("send_level", -6.0)) / 20.0))
+        delay_sec = delay_beats * (60.0 / max(40.0, bpm))
+        delay_samples = int(round(delay_sec * sr))
+        if delay_samples > 0 and delay_samples < segment.shape[-1]:
+            delayed = np.zeros_like(segment)
+            seg_len = segment.shape[-1]
+            for ch in range(segment.shape[0]):
+                in_ch = segment[ch] * send_lvl
+                out_ch = np.zeros(seg_len, dtype=np.float32)
+                for i in range(delay_samples, seg_len):
+                    out_ch[i] = in_ch[i - delay_samples] + feedback * out_ch[i - delay_samples]
+                delayed[ch] = out_ch
+            out[..., s_idx:e_idx] = np.clip(segment + delayed, -2.0, 2.0)
 
     return out
 
@@ -288,6 +321,9 @@ def render_plan(
                     f"transition duration ({plan.duration_s:.3f}s)"
                 )
             audio_to_process = audio.samples[:, cue_start_frames:]
+            warp_ratio_b = float(plan.metadata.get("warp_ratio_b", 1.0) or 1.0)
+            if abs(warp_ratio_b - 1.0) > 0.005:
+                audio_to_process = time_stretch_phase_vocoder_numpy(audio_to_process, warp_ratio_b)
 
         offset_frames = int(round(offset_s * sample_rate))
         transition_start_in_audio_s = plan.start_time_s - offset_s
@@ -304,6 +340,10 @@ def render_plan(
                     raw_key = resolve("b", MIX_STEM)
                 cue_f = int(round(cue_offset_b_s * sample_rate))
                 sliced_key = raw_key.samples[:, cue_f:]
+                # Lowpass filter sidechain key to 150 Hz so hi-hats do not trigger ducking
+                from scipy import signal
+                sos_key = signal.butter(2, min(150.0, sample_rate * 0.45) / (0.5 * sample_rate), btype="lowpass", output="sos")
+                sliced_key = signal.sosfilt(sos_key, sliced_key.astype(np.float64), axis=1).astype(np.float32)
                 start_pad_frames = int(round(plan.start_time_s * sample_rate))
                 key_audio_samples = np.pad(sliced_key, ((0, 0), (start_pad_frames, 0)))
             except Exception:
@@ -311,8 +351,37 @@ def render_plan(
 
         bpm_val = float(plan.metadata.get("tempo_b", plan.metadata.get("tempo_a", 126.0)) or 126.0)
 
+        # Check if stem contains an FDN spatial freeze effect
+        freeze_eff = next((e for e in automation.effects if getattr(e, "kind", "").lower() in ("spatial_freeze", "fdn_freeze", "reverb_freeze")), None)
+        wet_ghost_tail = None
+        if freeze_eff is not None:
+            # Generate pure wet freeze reverberant ghost tail (dry=0.0)
+            p_dict = dict(getattr(freeze_eff, "params", {}) or {})
+            p_dict["dry"] = 0.0
+            wet_freeze_spec = EffectSpec(
+                kind=freeze_eff.kind,
+                start_hz=freeze_eff.start_hz,
+                end_hz=freeze_eff.end_hz,
+                start_s=freeze_eff.start_s,
+                end_s=freeze_eff.end_s,
+                params=p_dict,
+            )
+            wet_ghost_tail = apply_effect_spec_to_stem(
+                audio_to_process,
+                wet_freeze_spec,
+                sr=sample_rate,
+                bpm=bpm_val,
+                sidechain_key_audio=key_audio_samples,
+                transition_start_s=transition_start_in_audio_s,
+                transition_duration_s=plan.duration_s,
+            )
+            # Exclude the freeze effect from the dry stem so the dry path receives gain automation
+            effs_to_run = [e for e in automation.effects if e != freeze_eff]
+        else:
+            effs_to_run = list(automation.effects)
+
         processed = audio_to_process
-        for effect in automation.effects:
+        for effect in effs_to_run:
             if effect.kind == "lowpass_sweep":
                 processed = apply_lowpass_sweep(
                     AudioBuffer(processed, audio.sample_rate),
@@ -348,6 +417,52 @@ def render_plan(
         output[
             :, offset_frames : offset_frames + available
         ] += processed[:, :available] * gains[np.newaxis, :available]
+
+        # Add the isolated wet reverberant ghost tail to the mix
+        if wet_ghost_tail is not None:
+            w_avail = min(wet_ghost_tail.shape[1], total_frames - offset_frames)
+            if w_avail > 0:
+                output[:, offset_frames : offset_frames + w_avail] += wet_ghost_tail[:, :w_avail]
+
+    # Inject bespoke synthesized transitional elements for Studio Remix (Song C)
+    if plan.metadata.get("studio_remix"):
+        t_impact_rel = float(plan.metadata.get("t_impact_s", plan.duration_s * (2.0 / 3.0)))
+        t_intro_rel = float(plan.metadata.get("t_intro_s", t_impact_rel * 0.5))
+        t_breath_rel = float(plan.metadata.get("t_breath_s", max(0.0, t_impact_rel - 0.25)))
+        impact_frame = int(round((plan.start_time_s + t_impact_rel) * sample_rate))
+
+        # 1. Reverse Crash Cymbal Swell into impact
+        try:
+            rev_crash = generate_reverse_crash(duration_s=min(1.5, t_impact_rel), sr=sample_rate, level_db=-9.0)
+            crash_len = rev_crash.shape[1]
+            crash_start = max(0, impact_frame - crash_len)
+            crash_avail = min(crash_len, total_frames - crash_start)
+            if crash_avail > 0:
+                output[:, crash_start : crash_start + crash_avail] += rev_crash[:, :crash_avail]
+        except Exception:
+            pass
+
+        # 2. Sub-Bass 808 Slam at impact downbeat
+        try:
+            root_pc = int(plan.metadata.get("bass_root_b", 2))
+            sub_808 = generate_sub_bass_808(duration_s=1.8, sr=sample_rate, root_pitch_class=root_pc, level_db=-6.0)
+            sub_len = sub_808.shape[1]
+            sub_avail = min(sub_len, total_frames - impact_frame)
+            if sub_avail > 0 and impact_frame >= 0:
+                output[:, impact_frame : impact_frame + sub_avail] += sub_808[:, :sub_avail]
+        except Exception:
+            pass
+
+        # 3. White/Pink Noise Riser during build-up (t_intro -> t_breath)
+        try:
+            riser_dur = max(0.4, t_breath_rel - t_intro_rel)
+            riser = generate_noise_riser(duration_s=riser_dur, sr=sample_rate, level_db=-14.0, sidechain_bpm=bpm_val)
+            riser_start = int(round((plan.start_time_s + t_intro_rel) * sample_rate))
+            riser_avail = min(riser.shape[1], total_frames - riser_start)
+            if riser_avail > 0 and riser_start >= 0:
+                output[:, riser_start : riser_start + riser_avail] += riser[:, :riser_avail]
+        except Exception:
+            pass
 
     add_unique_note(
         notes,

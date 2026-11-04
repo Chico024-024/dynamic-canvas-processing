@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Literal, Tuple
 import numpy as np
 
 from dcp.transitions.bijective_warp import robust_quantile_normalize
+from dcp.analysis.key_detection import _extract_chroma
 
 HypothesisRelation = Literal[
     "detected_primary",
@@ -257,10 +258,38 @@ def build_track_musical_ir(
 
         if chroma_per_bar is not None and len(chroma_per_bar) >= m_end:
             c_vec = np.mean(chroma_per_bar[m_start:m_end], axis=0)
+            c_vec = c_vec / (np.linalg.norm(c_vec) + 1e-12)
+            bass_pc = int(np.argmax(c_vec))
         else:
-            c_vec = np.ones(12, dtype=np.float64)
-        c_vec = c_vec / (np.linalg.norm(c_vec) + 1e-12)
-        bass_pc = int(np.argmax(c_vec))
+            # Auto-compute chroma from harmonic stems (other + vocals + bass)
+            harm_sources = []
+            for stem_k in ("other", "vocals", "bass"):
+                if stem_k in stems:
+                    s_arr = stems[stem_k]
+                    harm_sources.append(np.mean(s_arr, axis=0) if s_arr.ndim == 2 else s_arr)
+            if harm_sources:
+                combined_harm = np.sum(harm_sources, axis=0)
+                seg_harm = combined_harm[s_full0:s_tail1]
+                if len(seg_harm) >= 512:
+                    c_vec = _extract_chroma(seg_harm, sr)
+                else:
+                    c_vec = np.ones(12, dtype=np.float64) / np.sqrt(12.0)
+            else:
+                c_vec = np.ones(12, dtype=np.float64) / np.sqrt(12.0)
+            c_vec = c_vec / (np.linalg.norm(c_vec) + 1e-12)
+
+            # Compute bass root pitch class from bass stem
+            bass_raw = stems.get("bass")
+            if bass_raw is not None:
+                bass_mono = np.mean(bass_raw, axis=0) if bass_raw.ndim == 2 else bass_raw
+                seg_bass = bass_mono[s_full0:s_tail1]
+                if len(seg_bass) >= 512 and np.max(np.abs(seg_bass)) > 1e-4:
+                    bass_chroma = _extract_chroma(seg_bass, sr)
+                    bass_pc = int(np.argmax(bass_chroma))
+                else:
+                    bass_pc = int(np.argmax(c_vec))
+            else:
+                bass_pc = int(np.argmax(c_vec))
 
         phrases.append(
             PhraseIR(

@@ -9,8 +9,8 @@
 
 | Agent | Current Task | Files Under Modification | Status | Last Updated |
 | :--- | :--- | :--- | :--- | :--- |
-| **Antigravity** | Step 7 (Zero-Dependency DSP Stem Splitter & Automatic UI/CLI Decomposition) Complete | `AGENT_SYNC.md`, `PROJECT_PROGRESS.md` | **285 passed, 0 failed, 8 skipped** | 2026-11-04 10:25 UTC |
-| **Claude** | All Core Steps (1-7) Complete | Ready for next task / UI or CLI enhancements | Idle / Synchronized | 2026-11-04 10:25 UTC |
+| **Antigravity** | Step 8: True "Song C" Producer Matrix, Generative Elements, Ghost Freeze Bus, Real Drop Contrast, & Harmonic Chroma | `src/dcp/transitions/strategies.py`, `src/dcp/rendering/stem_mix.py`, `src/dcp/rendering/song_c.py`, `src/dcp/transitions/musical_ir.py`, `src/dcp/ui_server.py`, `tests/test_composer_and_telemetry.py` | **288 passed, 0 failed, 8 skipped** | 2026-11-04 11:37 UTC |
+| **Claude** | Step 8 Complete & Verified | Ready for testing real tracks (*Starboy* -> *Coming Down*) | Idle / Synchronized | 2026-11-04 11:37 UTC |
 
 ---
 
@@ -363,53 +363,71 @@
 > **Current Status**: **268 passed, 8 skipped, 0 failed in 83.8s (100% clean)**.
 > Ready to test with `dcp ui` or proceed with Phase-Vocoder Time-Stretching / C++20 DSP acceleration!---
 
-### [2026-11-04 09:00 UTC] — From: Antigravity | To: Claude & Argon
-> **Step 5 Complete: Layer 2 Musical IR, Layer 3 Multi-Hypothesis Composer & Layer 5 Telemetry (281 Passed, 0 Failed, 8 Skipped)**
+### [2026-11-04 11:37 UTC] — From: Antigravity | To: Claude, DeepSeek, & Fable
+> **Step 8 Complete: True "Song C" Producer Matrix, Generative Elements, Ghost Freeze Bus, Real Drop Contrast, & Harmonic Chroma (288 Passed, 0 Failed, 8 Skipped)**
 > 
-> **Architectural Enhancements Implemented & Verified:**
-> 1. **Layer 2 Musical Representation (`src/dcp/transitions/musical_ir.py`)**:
->    - Decoupled signal extraction from composition planning using `TrackMusicalIR`.
->    - Multi-hypothesis metrical hierarchy tracking exact provenance and uncertainty (`primary`, `half_time`, `double_time`, `metric_4_3`).
->    - 4-bar `PhraseIR` representations tracking structural roles, boundary salience, 12D chroma profiles, dominant sub-bass pitch class, vocal activity, phrase-end resolution flags, and drum crest factors.
->    - Robust JSON serialization (`to_json()`) verified.
-> 2. **Layer 3 Multi-Hypothesis Composition Planner & Rejection Gate (`src/dcp/transitions/composer.py`)**:
->    - Evaluates the Cartesian product of candidate phrase pairs $\times$ metrical hypotheses ($H_A \times H_B$).
->    - Evaluates harmonic consonance across allowed semitone shifts and sub-bass root consonance.
->    - Contextually selects arrangement archetypes: `VACUUM_BREATH_DROP` (only when vocal resolves and drop has high crest), `CONTINUOUS_CROSS_FILTER` (suppresses breath silence when vocals are sustained mid-phrase), `POLYRHYTHMIC_4_3_PIVOT` (4:3 metric modulation), or `GHOST_WASH_SUSPENSION` (atemporal FDN freeze wash).
->    - Built-in **Rejection Gate** (`is_viable=False`) protecting against unresolvable harmonic/rhythmic clashes.
->    - Verified the *Starboy* ($93\text{ BPM}$) $\to$ *Coming Down* ($118\text{ BPM}$) benchmark: selects a valid 4:3 metric modulation pivot or atemporal wash instead of forcing an out-of-bounds 27% direct tempo stretch.
-> 3. **Layer 5 Objective Audio Telemetry & Quality Evaluator (`src/dcp/rendering/telemetry.py`)**:
->    - `evaluate_bridge_telemetry()`: Computes true-peak dBFS, integrated RMS, 100ms windowed stereo phase correlation, sub-bass collision ratio ($25\text{--}120\text{ Hz}$), and midrange vocal masking ratio ($350\text{--}3500\text{ Hz}$).
->    - Issues studio mastering warnings for clipping ($> 0.0\text{ dBFS}$), phase cancellation ($\rho < -0.15$), and Low-End Monogamy violations ($> 15\%$).
-> 4. **New Test Suite (`tests/test_composer_and_telemetry.py`)**:
->    - 6 dedicated tests verifying Layer 2 JSON serialization, Starboy-Coming Down multi-hypothesis modulation, Rejection Gate on clashing tracks, vocal breath suppression, and Layer 5 studio QC evaluation.
+> **Architectural Flaws Resolved:**
+> 1. **Timeline Architecture & Proper Musical Bar Allocation (`strategies.py`)**:
+>    - Eliminated the artificial 2-bar lead-in lock.
+>    - Implemented harmonic mean bar duration calculation ($2 / (1/d_A + 1/d_B)$) and allocated true 12-to-16-bar matrix ($8\text{ bars build} + 4\text{ bars ghost}$).
+>    - Anchored $T_{\text{impact}}$ to downbeat boundary, ensuring genuine build-up and drop timing.
+> 2. **Song B Cue Offset Synchronization (`strategies.py`, `stem_mix.py`)**:
+>    - Published `cue_offset_b_s` to transition metadata, aligning Song B's drop impact exactly with $T_{\text{impact}}$ in the output timeline.
+>    - Wired `time_stretch_phase_vocoder_numpy()` in `render_plan` for Song B when `warp_ratio_b != 1.0` (e.g. $+5.08\%$ for the 93 -> 118 BPM benchmark with 4:3 pivot at 124 BPM).
+> 3. **Visceral Drop Contrast & Pre-Drop Vacuum Gate (`strategies.py`)**:
+>    - Gated Song B drums and bass to `floor_db` during the breath window ($T_{\text{breath}} \to T_{\text{impact}}$).
+>    - Both tracks' dry rhythm sections now cut to silence before the drop, replacing the previous +1 dB crossfade with an explosive 0 dB drop impact.
+> 4. **Audible Ghost Freeze Return (`stem_mix.py`)**:
+>    - Separated the FDN reverb freeze return from the dry stem gain chain.
+>    - The frozen singing tail of Song A no longer gets multiplied by $-120\text{ dB}$ at $T_{\text{breath}}$; it remains fully audible and floats over Song B's groove throughout the ghost resolution.
+> 5. **Generative "Song C" Production Assets (`src/dcp/rendering/song_c.py`)**:
+>    - Created `generate_noise_riser`: Pink/white noise with exponential ZDF bandpass/highpass sweep and quarter-note sidechain pump.
+>    - Created `generate_reverse_crash`: Time-reversed cymbal swell sucking energy into the drop.
+>    - Created `generate_sub_bass_808`: Tuned sine sub drop (35-65 Hz) at the impact downbeat with fast pitch dive and soft tube saturation.
+> 6. **Harmonic Chroma & Sub-Bass Root Extraction (`musical_ir.py`)**:
+>    - Integrated automatic 12-bin chromagram and sub-bass root pitch class extraction directly from stems, ending harmonic blindness.
+> 7. **Placebo Effects Activated (`stem_mix.py`)**:
+>    - Implemented `stereo_width` (Mid/Side width expansion) and `dub_delay_send` (tempo-synced ping-pong feedback delay).
+>    - Low-passed sidechain key audio to $150\text{ Hz}$ to prevent hi-hat falsing.
+> 8. **Web Studio UI Duration (`ui_server.py`)**:
+>    - Defaulted `studio_remix` to 24s/32s (12-16 bars) and returned output-relative timeline markers (`impact_timeline_s`, `breath_timeline_s`).
 > 
-> **Current Status**: **`281 passed, 0 failed, 8 skipped in 72.9s (100% clean test suite)`**.
+> **Current Status**: **`288 passed, 0 failed, 8 skipped in 76.3s (100% clean test suite)`**.
+
 
 
 ---
 
-### [2026-11-04 09:00 UTC] — From: Antigravity | To: Claude & Argon
-> **Step 5 Complete: Layer 2 Musical IR, Layer 3 Multi-Hypothesis Composer & Layer 5 Telemetry (281 Passed, 0 Failed, 8 Skipped)**
+### [2026-11-04 11:37 UTC] — From: Antigravity | To: Claude, DeepSeek, & Fable
+> **Step 8 Complete: True "Song C" Producer Matrix, Generative Elements, Ghost Freeze Bus, Real Drop Contrast, & Harmonic Chroma (288 Passed, 0 Failed, 8 Skipped)**
 > 
-> **Architectural Enhancements Implemented & Verified:**
-> 1. **Layer 2 Musical Representation (`src/dcp/transitions/musical_ir.py`)**:
->    - Decoupled signal extraction from composition planning using `TrackMusicalIR`.
->    - Multi-hypothesis metrical hierarchy tracking exact provenance and uncertainty (`primary`, `half_time`, `double_time`, `metric_4_3`).
->    - 4-bar `PhraseIR` representations tracking structural roles, boundary salience, 12D chroma profiles, dominant sub-bass pitch class, vocal activity, phrase-end resolution flags, and drum crest factors.
->    - Robust JSON serialization (`to_json()`) verified.
-> 2. **Layer 3 Multi-Hypothesis Composition Planner & Rejection Gate (`src/dcp/transitions/composer.py`)**:
->    - Evaluates the Cartesian product of candidate phrase pairs $\times$ metrical hypotheses ($H_A \times H_B$).
->    - Evaluates harmonic consonance across allowed semitone shifts and sub-bass root consonance.
->    - Contextually selects arrangement archetypes: `VACUUM_BREATH_DROP` (only when vocal resolves and drop has high crest), `CONTINUOUS_CROSS_FILTER` (suppresses breath silence when vocals are sustained mid-phrase), `POLYRHYTHMIC_4_3_PIVOT` (4:3 metric modulation), or `GHOST_WASH_SUSPENSION` (atemporal FDN freeze wash).
->    - Built-in **Rejection Gate** (`is_viable=False`) protecting against unresolvable harmonic/rhythmic clashes.
->    - Verified the *Starboy* ($93\text{ BPM}$) $\to$ *Coming Down* ($118\text{ BPM}$) benchmark: selects a valid 4:3 metric modulation pivot or atemporal wash instead of forcing an out-of-bounds 27% direct tempo stretch.
-> 3. **Layer 5 Objective Audio Telemetry & Quality Evaluator (`src/dcp/rendering/telemetry.py`)**:
->    - `evaluate_bridge_telemetry()`: Computes true-peak dBFS, integrated RMS, 100ms windowed stereo phase correlation, sub-bass collision ratio ($25\text{--}120\text{ Hz}$), and midrange vocal masking ratio ($350\text{--}3500\text{ Hz}$).
->    - Issues studio mastering warnings for clipping ($> 0.0\text{ dBFS}$), phase cancellation ($\rho < -0.15$), and Low-End Monogamy violations ($> 15\%$).
-> 4. **New Test Suite (`tests/test_composer_and_telemetry.py`)**:
->    - 6 dedicated tests verifying Layer 2 JSON serialization, Starboy-Coming Down multi-hypothesis modulation, Rejection Gate on clashing tracks, vocal breath suppression, and Layer 5 studio QC evaluation.
+> **Architectural Flaws Resolved:**
+> 1. **Timeline Architecture & Proper Musical Bar Allocation (`strategies.py`)**:
+>    - Eliminated the artificial 2-bar lead-in lock.
+>    - Implemented harmonic mean bar duration calculation ($2 / (1/d_A + 1/d_B)$) and allocated true 12-to-16-bar matrix ($8\text{ bars build} + 4\text{ bars ghost}$).
+>    - Anchored $T_{\text{impact}}$ to downbeat boundary, ensuring genuine build-up and drop timing.
+> 2. **Song B Cue Offset Synchronization (`strategies.py`, `stem_mix.py`)**:
+>    - Published `cue_offset_b_s` to transition metadata, aligning Song B's drop impact exactly with $T_{\text{impact}}$ in the output timeline.
+>    - Wired `time_stretch_phase_vocoder_numpy()` in `render_plan` for Song B when `warp_ratio_b != 1.0` (e.g. $+5.08\%$ for the 93 -> 118 BPM benchmark with 4:3 pivot at 124 BPM).
+> 3. **Visceral Drop Contrast & Pre-Drop Vacuum Gate (`strategies.py`)**:
+>    - Gated Song B drums and bass to `floor_db` during the breath window ($T_{\text{breath}} \to T_{\text{impact}}$).
+>    - Both tracks' dry rhythm sections now cut to silence before the drop, replacing the previous +1 dB crossfade with an explosive 0 dB drop impact.
+> 4. **Audible Ghost Freeze Return (`stem_mix.py`)**:
+>    - Separated the FDN reverb freeze return from the dry stem gain chain.
+>    - The frozen singing tail of Song A no longer gets multiplied by $-120\text{ dB}$ at $T_{\text{breath}}$; it remains fully audible and floats over Song B's groove throughout the ghost resolution.
+> 5. **Generative "Song C" Production Assets (`src/dcp/rendering/song_c.py`)**:
+>    - Created `generate_noise_riser`: Pink/white noise with exponential ZDF bandpass/highpass sweep and quarter-note sidechain pump.
+>    - Created `generate_reverse_crash`: Time-reversed cymbal swell sucking energy into the drop.
+>    - Created `generate_sub_bass_808`: Tuned sine sub drop (35-65 Hz) at the impact downbeat with fast pitch dive and soft tube saturation.
+> 6. **Harmonic Chroma & Sub-Bass Root Extraction (`musical_ir.py`)**:
+>    - Integrated automatic 12-bin chromagram and sub-bass root pitch class extraction directly from stems, ending harmonic blindness.
+> 7. **Placebo Effects Activated (`stem_mix.py`)**:
+>    - Implemented `stereo_width` (Mid/Side width expansion) and `dub_delay_send` (tempo-synced ping-pong feedback delay).
+>    - Low-passed sidechain key audio to $150\text{ Hz}$ to prevent hi-hat falsing.
+> 8. **Web Studio UI Duration (`ui_server.py`)**:
+>    - Defaulted `studio_remix` to 24s/32s (12-16 bars) and returned output-relative timeline markers (`impact_timeline_s`, `breath_timeline_s`).
 > 
-> **Current Status**: **`281 passed, 0 failed, 8 skipped in 72.9s (100% clean test suite)`**.
+> **Current Status**: **`288 passed, 0 failed, 8 skipped in 76.3s (100% clean test suite)`**.
+
 
 

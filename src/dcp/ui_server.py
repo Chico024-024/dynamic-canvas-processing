@@ -203,6 +203,7 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
             song_b_data = None
             strategy = "optimized"
             transition_duration = 8.0
+            user_specified_duration = False
 
             for part in parts:
                 name = part.get("name", "")
@@ -226,8 +227,12 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                     )
                     try:
                         transition_duration = float(dur_str)
+                        user_specified_duration = True
                     except (ValueError, TypeError):
                         transition_duration = 8.0
+
+            if not user_specified_duration and strategy == "studio_remix":
+                transition_duration = 24.0
 
             if not song_a_data or not song_b_data:
                 self._send_json_response({"error": "Both song_a and song_b required"}, status=400)
@@ -320,6 +325,8 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                 telemetry_report = evaluate_bridge_telemetry(mix_result.audio.samples, sr=mix_result.audio.sample_rate)
 
                 plan_dict = plan.to_dict() if hasattr(plan, "to_dict") else {}
+                t_impact_val = float(plan.metadata.get("t_impact_s", 0.0) or 0.0)
+                t_breath_val = float(plan.metadata.get("t_breath_s", 0.0) or 0.0)
                 result = {
                     "mix_id": mix_id,
                     "mix_url": f"/api/audio/mix_{mix_id}.wav",
@@ -329,6 +336,8 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                     "song_b_duration_s": song_b.duration_s,
                     "transition_start_s": plan.start_time_s,
                     "transition_duration_s": plan.duration_s,
+                    "impact_timeline_s": plan.start_time_s + t_impact_val,
+                    "breath_timeline_s": plan.start_time_s + t_breath_val,
                     "downbeat_a_s": float(plan.metadata.get("downbeat_a_s", 0.0) or 0.0),
                     "downbeat_b_s": float(plan.metadata.get("downbeat_b_s", 0.0) or 0.0),
                     "automations": plan_dict.get("automations", []),

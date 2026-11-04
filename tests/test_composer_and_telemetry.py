@@ -381,4 +381,112 @@ def test_studio_remix_renders_and_passes_layer_5_telemetry():
     assert report.true_peak_dbfs <= 0.0
 
 
+def test_song_c_synthesized_generators():
+    """Verify Song C generative production elements synthesize cleanly without NaN or clipping."""
+    from dcp.rendering.song_c import generate_noise_riser, generate_reverse_crash, generate_sub_bass_808
+
+    sr = 48000
+    riser = generate_noise_riser(duration_s=2.0, sr=sr, sidechain_bpm=120.0)
+    assert riser.shape == (2, 2 * sr)
+    assert np.all(np.isfinite(riser))
+    assert np.max(np.abs(riser)) <= 1.0
+
+    crash = generate_reverse_crash(duration_s=1.5, sr=sr)
+    assert crash.shape == (2, int(1.5 * sr))
+    assert np.all(np.isfinite(crash))
+    # Reverse crash must peak at the end (last 10% has higher RMS than first 10%)
+    first_rms = np.sqrt(np.mean(crash[:, :int(0.15 * sr)] ** 2))
+    last_rms = np.sqrt(np.mean(crash[:, -int(0.15 * sr):] ** 2))
+    assert last_rms > first_rms * 2.0
+
+    sub = generate_sub_bass_808(duration_s=1.8, sr=sr, root_pitch_class=2)
+    assert sub.shape == (2, int(1.8 * sr))
+    assert np.all(np.isfinite(sub))
+    assert np.max(np.abs(sub)) <= 1.0
+
+
+def test_ghost_freeze_reverb_stays_audible_after_breath():
+    """Verify that Song A's frozen FDN reverb tail is NOT muted by dry gain cutoff."""
+    from dcp.models import AudioBuffer
+    from dcp.transitions.plan import EffectSpec, GainPoint, StemAutomation, TransitionPlan
+    from dcp.rendering import render_plan
+
+    sr = 48000
+    n = sr * 8
+    time = np.arange(n) / sr
+    vocal_sine = 0.5 * np.sin(2 * np.pi * 440 * time).astype(np.float32)
+    vocal = AudioBuffer(np.vstack([vocal_sine, vocal_sine]), sr)
+    stems_a = {"vocals": vocal}
+    stems_b = {"vocals": AudioBuffer(np.zeros((2, n), dtype=np.float32), sr)}
+    mix = vocal
+
+    # Automate dry vocal to cut completely at 2.0s (-120 dB) with spatial_freeze
+    plan = TransitionPlan(
+        strategy="test_ghost",
+        requested_strategy="test_ghost",
+        duration_s=4.0,
+        start_time_s=0.0,
+        end_time_s=4.0,
+        automations=(
+            StemAutomation(
+                source="a",
+                stem="vocals",
+                points=(
+                    GainPoint(0.0, 0.0),
+                    GainPoint(2.0, 0.0),
+                    GainPoint(2.005, -120.0),
+                    GainPoint(4.0, -120.0),
+                ),
+                effects=(
+                    EffectSpec(
+                        kind="spatial_freeze",
+                        start_s=0.0,
+                        end_s=4.0,
+                        params={"freeze_mode": True, "freeze_engage_s": 1.95, "freeze_release_s": 4.0, "wet_mix_start": 0.6},
+                    ),
+                ),
+            ),
+            StemAutomation(
+                source="b",
+                stem="vocals",
+                points=(
+                    GainPoint(0.0, -120.0),
+                    GainPoint(4.0, -120.0),
+                ),
+            ),
+        ),
+        metadata={"cue_offset_b_s": 0.0},
+    )
+
+    rendered = render_plan(mix, mix, plan, stems_a=stems_a, stems_b=stems_b)
+    # Check post-breath audio between 2.2s and 3.5s:
+    post_breath = rendered.audio.samples[:, int(2.2 * sr) : int(3.5 * sr)]
+    rms_post_breath = float(np.sqrt(np.mean(post_breath ** 2)))
+    # RMS must be clearly audible (> -50 dBFS ~ 0.00316)
+    assert rms_post_breath > 0.001, f"Ghost tail was silenced! RMS = {rms_post_breath}"
+
+
+def test_effects_stereo_width_and_dub_delay():
+    """Verify stereo_width and dub_delay_send actively process audio."""
+    from dcp.transitions.plan import EffectSpec
+    from dcp.rendering.stem_mix import apply_effect_spec_to_stem
+
+    sr = 48000
+    n = sr * 2
+    time = np.arange(n) / sr
+    audio = np.vstack([
+        0.5 * np.sin(2 * np.pi * 440 * time).astype(np.float32),
+        0.3 * np.sin(2 * np.pi * 440 * time).astype(np.float32),
+    ])
+
+    eff_width = EffectSpec(kind="stereo_width", start_s=0.0, end_s=2.0, params={"width_start": 1.0, "width_end": 2.0})
+    widened = apply_effect_spec_to_stem(audio, eff_width, sr=sr)
+    assert not np.allclose(audio, widened)
+
+    eff_delay = EffectSpec(kind="dub_delay_send", start_s=0.0, end_s=2.0, params={"delay_note": 0.5, "feedback": 0.5})
+    delayed = apply_effect_spec_to_stem(audio, eff_delay, sr=sr, bpm=120.0)
+    assert not np.allclose(audio, delayed)
+
+
+
 

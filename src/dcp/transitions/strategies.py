@@ -270,6 +270,7 @@ def _transition_times(
 ) -> tuple[float, float]:
     end = context.song_a.duration_s
     start = max(0.0, end - duration_s)
+    end = start + duration_s
     return start, end
 
 
@@ -282,8 +283,13 @@ def _make_plan(
     reasoning: list[str],
     warnings: list[str],
     metadata: dict[str, object] | None = None,
+    start_time_s: float | None = None,
 ) -> TransitionPlan:
-    start, end = _transition_times(context, duration_s)
+    if start_time_s is not None:
+        start = float(start_time_s)
+        end = start + float(duration_s)
+    else:
+        start, end = _transition_times(context, duration_s)
     return TransitionPlan(
         strategy=strategy,
         requested_strategy=context.requested_strategy,
@@ -1253,26 +1259,64 @@ class StudioRemixStrategy:
                 breath_beats = 2 if breath_end > breath_start else 0
                 anchor_conf = anchor_result.confidence
 
-        # The bridge duration: 8 bars (bridge) + 4 bars (ghost resolution) = 12 bars
-        bridge_bars = 8
-        ghost_bars = 4
-        total_bridge_bars = bridge_bars + ghost_bars
-        bridge_duration_s = total_bridge_bars * bar_duration_a
+        # Determine effective bar duration across the transition
+        bar_duration_a = 4.0 * 60.0 / max(20.0, tempo_a)
+        bar_duration_b = 4.0 * 60.0 / max(20.0, tempo_b)
+        effective_bar_s = 2.0 / (1.0 / max(1e-3, bar_duration_a) + 1.0 / max(1e-3, bar_duration_b))
 
-        # Transition starts at bridge_start_a, ends at end of Song A
-        duration = context.song_a.duration_s - bridge_start_a
+        # Determine master BPM and warp ratio for Song B
+        if archetype == "POLYRHYTHMIC_4_3_PIVOT":
+            # For 4:3 pivot, master BPM aligns with 4:3 dotted metric grid
+            master_bpm = tempo_a * (4.0 / 3.0) if tempo_a < tempo_b else tempo_a * (3.0 / 4.0)
+            warp_ratio_b = master_bpm / tempo_b
+        else:
+            master_bpm = (tempo_a + tempo_b) * 0.5
+            warp_ratio_b = 1.0
 
-        # Clamp to valid range
-        minimum = context.config.transition.min_duration_s
-        maximum = context.max_duration_s
-        if duration < minimum:
-            duration = minimum
-        if duration > maximum:
-            duration = maximum
+        # Bar count allocation: 12 bars (8 build + 4 ghost) or adaptive
+        max_trans_dur = min(context.max_duration_s, context.song_a.duration_s)
+        if context.requested_duration_s > 10.0:
+            desired_bars = max(4, int(round(context.requested_duration_s / effective_bar_s)))
+        else:
+            desired_bars = 12
 
-        # Determine available bars for the matrix
-        available_bars = max(2, int(duration / bar_duration_a))  # At least 2 bars
-        matrix_bars = min(12, available_bars)  # Cap at 12 bars max
+        total_bridge_bars = min(16, max(4, desired_bars))
+        ghost_bars = max(2, total_bridge_bars // 3)
+        lead_in_bars = total_bridge_bars - ghost_bars
+        bridge_duration_s = total_bridge_bars * effective_bar_s
+
+        max_trans_dur = min(context.max_duration_s, context.song_a.duration_s, context.song_b.duration_s)
+        if bridge_duration_s > max_trans_dur:
+            total_bridge_bars = max(2, int(max_trans_dur / effective_bar_s))
+            ghost_bars = max(1, total_bridge_bars // 3)
+            lead_in_bars = max(1, total_bridge_bars - ghost_bars)
+            bridge_duration_s = min(max_trans_dur, total_bridge_bars * effective_bar_s)
+
+        duration = bridge_duration_s
+
+        # Launchpad A and Impact B timing
+        t_impact = lead_in_bars * effective_bar_s
+        t_intro = t_impact * 0.5
+
+        if archetype == "CONTINUOUS_CROSS_FILTER" or breath_beats == 0:
+            breath_dur = 0.0
+            t_breath = t_impact
+        else:
+            raw_breath = max(0.04, float(breath_end - breath_start)) if (breath_end > breath_start) else (bar_duration_b * 0.25)
+            breath_dur = max(0.08, min(t_impact * 0.25, raw_breath))
+            t_breath = t_impact - breath_dur
+
+        bridge_start_a = max(0.0, launchpad_a - t_impact)
+        if bridge_start_a + duration > context.song_a.duration_s:
+            bridge_start_a = max(0.0, context.song_a.duration_s - duration)
+            t_impact = min(duration - 0.05, max(0.35 * duration, launchpad_a - bridge_start_a))
+            t_intro = t_impact * 0.5
+            t_breath = max(0.0, t_impact - breath_dur) if breath_dur > 0 else t_impact
+
+        # Song B Cue Offset: aligns impact_b with t_impact
+        cue_offset_b_s = max(0.0, impact_b - (t_impact * (tempo_b / master_bpm)))
+        if cue_offset_b_s + duration > context.song_b.duration_s:
+            cue_offset_b_s = max(0.0, context.song_b.duration_s - duration)
 
         floor_db = context.config.transition.fade_floor_db
 
@@ -1296,11 +1340,12 @@ class StudioRemixStrategy:
             warnings,
             archetype=archetype,
             breath_beats=breath_beats,
+            t_impact=t_impact,
+            t_intro=t_intro,
+            t_breath=t_breath,
         )
 
         # Add reasoning
-        ghost_bars = min(4, max(1, matrix_bars // 3))
-        bridge_bars = matrix_bars - ghost_bars
         if composed_plan:
             reasoning.append(
                 f"Layer 3 Composer: Archetype={archetype}, Mode={transition_mode}, Feasibility={feasibility_score:.3f}."
@@ -1308,17 +1353,20 @@ class StudioRemixStrategy:
             reasoning.append(f"Composer Rationale: {composer_rationale}")
 
         reasoning.extend([
-            f"Studio Remix (Song C) bridge: {matrix_bars} bars ({bridge_bars} bridge + {ghost_bars} ghost) "
-            f"from {bridge_start_a:.2f}s to {context.song_a.duration_s:.2f}s in Song A.",
+            f"Studio Remix (Song C) bridge: {total_bridge_bars} bars ({lead_in_bars} bridge + {ghost_bars} ghost) "
+            f"from {bridge_start_a:.2f}s to {bridge_start_a + duration:.2f}s in Song A.",
             f"Launchpad (T_launch): Song A downbeat at {launchpad_a:.3f}s - "
             f"phrase-aligned, groove energy maximized, vocal concluding.",
             f"Impact (T_impact): Song B downbeat at {impact_b:.3f}s - "
             f"the Drop! Low-end surge maximized, kick crest factor peak.",
             f"Breath Window: {breath_start:.3f}s – {breath_end:.3f}s in Song B "
             f"({(breath_end - breath_start) / max(1e-4, beat_duration_b):.1f} beats acoustic vacuum).",
-            f"Song B cued at offset {impact_b - lead_in_bars * bar_duration_b:.3f}s "
-            f"({lead_in_bars} bars lead-in) for phase-locked impact.",
+            f"Song B cued at offset {cue_offset_b_s:.3f}s for phase-locked impact at {t_impact:.2f}s.",
         ])
+
+        bass_root_val = 2
+        if composed_plan is not None and hasattr(composed_plan, "impact_phrase_b"):
+            bass_root_val = getattr(composed_plan.impact_phrase_b, "bass_root_pc", 2)
 
         metadata = {
             "studio_remix": True,
@@ -1326,11 +1374,15 @@ class StudioRemixStrategy:
             "transition_mode": transition_mode,
             "feasibility_score": round(feasibility_score, 4),
             "composer_rationale": composer_rationale,
-            "bridge_bars": bridge_bars,
+            "bridge_bars": lead_in_bars,
             "ghost_bars": ghost_bars,
             "total_bridge_bars": total_bridge_bars,
             "launchpad_a_s": round(launchpad_a, 6),
             "impact_b_s": round(impact_b, 6),
+            "cue_offset_b_s": round(cue_offset_b_s, 6),
+            "t_impact_s": round(t_impact, 6),
+            "t_intro_s": round(t_intro, 6),
+            "t_breath_s": round(t_breath, 6),
             "breath_start_s": round(breath_start, 6),
             "breath_end_s": round(breath_end, 6),
             "breath_beats": breath_beats,
@@ -1338,6 +1390,9 @@ class StudioRemixStrategy:
             "lead_in_bars": lead_in_bars,
             "tempo_a": round(tempo_a, 3),
             "tempo_b": round(tempo_b, 3),
+            "master_bpm": round(master_bpm, 3),
+            "warp_ratio_b": round(warp_ratio_b, 6),
+            "bass_root_b": int(bass_root_val),
             "anchor_confidence": round(anchor_conf, 4),
             "phase_locked": True,
             "low_end_monogamy": True,
@@ -1354,6 +1409,7 @@ class StudioRemixStrategy:
             reasoning=reasoning,
             warnings=warnings,
             metadata=metadata,
+            start_time_s=bridge_start_a,
         )
 
     def _build_studio_remix_automations(
@@ -1376,6 +1432,9 @@ class StudioRemixStrategy:
         warnings: list,
         archetype: str = "VACUUM_BREATH_DROP",
         breath_beats: int = 2,
+        t_impact: float | None = None,
+        t_intro: float | None = None,
+        t_breath: float | None = None,
     ) -> list[StemAutomation]:
         """Build stem automations following the 12-bar Producer Matrix from Model 4 Argon.
 
@@ -1384,34 +1443,34 @@ class StudioRemixStrategy:
         sample_rate = context.song_a.sample_rate
         nyquist_limit = (sample_rate / 2.0) * 0.95
 
-        # Time in transition coordinates (0 = bridge_start_a, duration_s = end of transition)
-        launchpad_trans = launchpad_a - bridge_start_a
-
         # Determine the 4 producer matrix phases across duration_s:
         # Phase 1: Intro / Lead-in (0.0 -> t_intro)
         # Phase 2: Build-up / Filter Sweeps (t_intro -> t_breath)
         # Phase 3: Breath Window (t_breath -> t_impact)
         # Phase 4: Impact Drop & Ghost Decay (t_impact -> duration_s)
 
-        if 0.35 * duration_s <= launchpad_trans <= 0.85 * duration_s:
-            t_impact = launchpad_trans
-        else:
-            t_impact = (2.0 / 3.0) * duration_s
+        if t_impact is None:
+            launchpad_trans = launchpad_a - bridge_start_a
+            if 0.35 * duration_s <= launchpad_trans <= 0.85 * duration_s:
+                t_impact = launchpad_trans
+            else:
+                t_impact = (2.0 / 3.0) * duration_s
 
-        t_intro = t_impact * 0.5
+        if t_intro is None:
+            t_intro = t_impact * 0.5
 
-        # Breath window: 1-2 beats before impact, bounded within Phase 2
-        build_duration = t_impact - t_intro
-        max_breath = build_duration * 0.35
-        if archetype == "CONTINUOUS_CROSS_FILTER" or breath_beats == 0:
-            breath_dur = 0.0
-            t_breath = t_impact
-            eps_cut = 0.005
-        else:
-            raw_breath = max(0.04, float(breath_end - breath_start)) if (breath_end > breath_start) else (bar_duration_b * 0.25)
-            breath_dur = max(0.02, min(max_breath, raw_breath))
-            t_breath = t_impact - breath_dur
-            eps_cut = min(0.005, breath_dur * 0.15)
+        if t_breath is None:
+            build_duration = t_impact - t_intro
+            max_breath = build_duration * 0.35
+            if archetype == "CONTINUOUS_CROSS_FILTER" or breath_beats == 0:
+                breath_dur = 0.0
+                t_breath = t_impact
+            else:
+                raw_breath = max(0.04, float(breath_end - breath_start)) if (breath_end > breath_start) else (bar_duration_b * 0.25)
+                breath_dur = max(0.02, min(max_breath, raw_breath))
+                t_breath = t_impact - breath_dur
+
+        eps_cut = min(0.005, max(0.001, (t_impact - t_breath) * 0.15)) if t_impact > t_breath else 0.005
 
         # Helper to create guaranteed strictly increasing GainPoints within [0, duration_s]
         def gain_automation(raw_points: list[tuple[float, float]]) -> tuple[GainPoint, ...]:
@@ -1644,13 +1703,23 @@ class StudioRemixStrategy:
             effects = ()
 
             if stem_name == "drums":
-                pts = gain_automation([
-                    (0.0, -18.0),
-                    (t_intro, -4.0),
-                    (t_breath, -1.0),
-                    (t_impact, 0.0),
-                    (duration_s, 0.0),
-                ])
+                if archetype == "CONTINUOUS_CROSS_FILTER" or breath_beats == 0:
+                    pts = gain_automation([
+                        (0.0, -18.0),
+                        (t_intro, -6.0),
+                        (t_impact - 0.05, -2.0),
+                        (t_impact, 0.0),
+                        (duration_s, 0.0),
+                    ])
+                else:
+                    pts = gain_automation([
+                        (0.0, -18.0),
+                        (t_intro, -6.0),
+                        (max(0.0, t_breath - 0.1), -3.0),
+                        (t_breath, floor_db),
+                        (t_impact, 0.0),
+                        (duration_s, 0.0),
+                    ])
                 effects = tuple(
                     e for e in [
                         make_effect("zdf_highpass", 0.0, t_intro, 220.0, 220.0),
@@ -1660,7 +1729,7 @@ class StudioRemixStrategy:
                     ] if e is not None
                 )
                 reasoning.append(
-                    "Song B drums: Tease HPF@220Hz, HPF 220→90Hz build, Full drop @ impact driving sidechain."
+                    "Song B drums: Tease HPF@220Hz, HPF 220→90Hz build, Pre-drop vacuum cut, Full explosive drop @ impact driving sidechain."
                 )
 
             elif stem_name == "bass":
@@ -1668,8 +1737,8 @@ class StudioRemixStrategy:
                     (0.0, floor_db),
                     (t_intro, floor_db),
                     (t_intro + eps_cut, -9.0),
-                    (t_breath, -6.0),
-                    (t_breath + eps_cut, floor_db),
+                    (max(0.0, t_breath - 0.1), -6.0),
+                    (t_breath, floor_db),
                     (t_impact, 0.0),
                     (duration_s, 0.0),
                 ])
@@ -1679,7 +1748,7 @@ class StudioRemixStrategy:
                     ] if e is not None
                 )
                 reasoning.append(
-                    "Song B bass: Muted early, Sub-swell -9dB LPF@110Hz build, Muted at breath, Full authority @ impact."
+                    "Song B bass: Muted early, Sub-swell -9dB LPF@110Hz build, Pre-drop vacuum silence, Full authority @ impact."
                 )
 
             elif stem_name == "vocals":
@@ -1703,8 +1772,8 @@ class StudioRemixStrategy:
                 else:
                     pts = gain_automation([
                         (0.0, -18.0),
-                        (t_intro, -9.0),
-                        (t_breath, -2.0),
+                        (t_intro, -10.0),
+                        (t_breath, -4.0),
                         (t_breath + eps_cut, 0.0),
                         (duration_s, 0.0),
                     ])
@@ -1715,14 +1784,15 @@ class StudioRemixStrategy:
                         ] if e is not None
                     )
                     reasoning.append(
-                        "Song B vocals: Ad-libs Bandpass 400-3500Hz, Rising hook, Solo spotlight @ breath, Full lead @ impact."
+                        "Song B vocals: Ad-libs Bandpass 400-3500Hz, Rising hook, Spotlight @ breath, Full lead @ impact."
                     )
 
             elif stem_name == "other":
                 pts = gain_automation([
                     (0.0, -18.0),
-                    (t_intro, -6.0),
-                    (t_breath, -1.5),
+                    (t_intro, -8.0),
+                    (max(0.0, t_breath - 0.1), -3.0),
+                    (t_breath, -14.0),
                     (t_impact, 0.0),
                     (duration_s, 0.0),
                 ])
@@ -1733,7 +1803,7 @@ class StudioRemixStrategy:
                     ] if e is not None
                 )
                 reasoning.append(
-                    "Song B other: Tease LPF 400→2500Hz, LPF opens 2.5k→10kHz -6→-1.5dB, Full synth drop @ impact."
+                    "Song B other: Tease LPF 400→2500Hz, LPF opens 2.5k→10kHz, Vacuum dip @ breath, Full synth drop @ impact."
                 )
 
             else:
