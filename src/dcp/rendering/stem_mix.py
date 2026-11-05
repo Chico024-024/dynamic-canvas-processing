@@ -263,6 +263,9 @@ def render_plan(
 
     cache: dict[tuple[str, str], tuple[AudioBuffer, tuple[str, ...]]] = {}
 
+    # List to collect wet freeze ghost tails for post-glue re-addition
+    ghost_tails: list[tuple[np.ndarray, int, int]] = []
+
     def resolve(source: str, stem: str) -> AudioBuffer:
         key = (source, stem)
         if key not in cache:
@@ -378,6 +381,9 @@ def render_plan(
                 transition_start_s=transition_start_in_audio_s,
                 transition_duration_s=plan.duration_s,
             )
+            if wet_ghost_tail is not None:
+                available = min(audio_to_process.shape[1], total_frames - offset_frames)
+                ghost_tails.append((wet_ghost_tail, offset_frames, available))
             # Exclude the freeze effect from the dry stem so the dry path receives gain automation
             effs_to_run = [e for e in automation.effects if e != freeze_eff]
         else:
@@ -434,9 +440,9 @@ def render_plan(
         t_breath_rel = float(plan.metadata.get("t_breath_s", max(0.0, t_impact_rel - 0.25)))
         impact_frame = int(round((plan.start_time_s + t_impact_rel) * sample_rate))
 
-        # 1. Reverse Crash Cymbal Swell into impact
+        # 1. Reverse Crash Cymbal Swell into impact (BOOSTED)
         try:
-            rev_crash = generate_reverse_crash(duration_s=min(1.5, t_impact_rel), sr=sample_rate, level_db=-9.0)
+            rev_crash = generate_reverse_crash(duration_s=min(1.5, t_impact_rel), sr=sample_rate, level_db=-6.0)
             crash_len = rev_crash.shape[1]
             crash_start = max(0, impact_frame - crash_len)
             crash_avail = min(crash_len, total_frames - crash_start)
@@ -445,10 +451,10 @@ def render_plan(
         except Exception:
             pass
 
-        # 2. Sub-Bass 808 Slam at impact downbeat
+        # 2. Sub-Bass 808 Slam at impact downbeat (BOOSTED)
         try:
             root_pc = int(plan.metadata.get("bass_root_b", 2))
-            sub_808 = generate_sub_bass_808(duration_s=1.8, sr=sample_rate, root_pitch_class=root_pc, level_db=-6.0)
+            sub_808 = generate_sub_bass_808(duration_s=1.8, sr=sample_rate, root_pitch_class=root_pc, level_db=-3.0)
             sub_len = sub_808.shape[1]
             sub_avail = min(sub_len, total_frames - impact_frame)
             if sub_avail > 0 and impact_frame >= 0:
@@ -456,29 +462,49 @@ def render_plan(
         except Exception:
             pass
 
-        # 4. Syncopated Vocal Chops under ghost resolution (impact -> end)
+        # 3. Noise Riser during build-up (BOOSTED)
+        try:
+            riser_dur = max(0.5, t_breath_rel - t_intro_rel)
+            riser = generate_noise_riser(duration_s=riser_dur, sr=sample_rate, level_db=-8.0, sidechain_bpm=bpm_val)
+            riser_start = int(round((plan.start_time_s + t_intro_rel) * sample_rate))
+            riser_avail = min(riser.shape[1], total_frames - riser_start)
+            if riser_avail > 0 and riser_start >= 0:
+                output[:, riser_start : riser_start + riser_avail] += riser[:, :riser_avail]
+        except Exception:
+            pass
+
+        # 4. Syncopated Vocal Chops from RESOLVING PHRASE ONLY (not full stem)
         try:
             a_stems = sources["a"][1]
             if a_stems and "vocals" in a_stems:
                 raw_voc = a_stems["vocals"].samples
+                # Use only the vocal tail from launchpad phrase to end
+                # launchpad is at t_impact_rel in transition coords
+                launchpad_frame = int(round((plan.start_time_s + t_impact_rel) * sample_rate))
+                vocal_tail_start = max(0, launchpad_frame - int(0.5 * sample_rate))  # 0.5s before launchpad
+                vocal_tail = raw_voc[:, vocal_tail_start:]
                 res_dur = max(0.5, plan.duration_s - t_impact_rel)
-                chops = generate_vocal_chops(raw_voc, sr=sample_rate, bpm=bpm_val, duration_s=res_dur, level_db=-10.0)
+                chops = generate_vocal_chops(vocal_tail, sr=sample_rate, bpm=bpm_val, duration_s=res_dur, level_db=-6.0)
                 chops_avail = min(chops.shape[1], total_frames - impact_frame)
                 if chops_avail > 0 and impact_frame >= 0:
                     output[:, impact_frame : impact_frame + chops_avail] += chops[:, :chops_avail]
         except Exception:
             pass
 
-        # 5. Half-Time Drum Re-grooving pocket during post-impact bridge
+        # 5. Half-Time Drum Re-grooving pocket during post-impact bridge (BOOSTED + HPF)
         try:
             b_stems = sources["b"][1]
             if b_stems and "drums" in b_stems:
                 raw_drums = b_stems["drums"].samples
                 pocket_dur = min(8.0, max(1.0, plan.duration_s - t_impact_rel))
                 regrooved = regroove_drums_half_time(raw_drums, sr=sample_rate, bpm=bpm_val, duration_s=pocket_dur)
+                # High-pass at 100Hz to avoid kick clash with main drums
+                from scipy import signal
+                sos_hp = signal.butter(2, min(100.0, sample_rate * 0.45) / (0.5 * sample_rate), btype="highpass", output="sos")
+                regrooved = signal.sosfilt(sos_hp, regrooved.astype(np.float64), axis=1).astype(np.float32)
                 pocket_avail = min(regrooved.shape[1], total_frames - impact_frame)
                 if pocket_avail > 0 and impact_frame >= 0:
-                    output[:, impact_frame : impact_frame + pocket_avail] += regrooved[:, :pocket_avail] * 0.45
+                    output[:, impact_frame : impact_frame + pocket_avail] += regrooved[:, :pocket_avail] * 1.0
         except Exception:
             pass
 
@@ -487,6 +513,13 @@ def render_plan(
             output = process_master_bus_glue_numpy(output, sr=sample_rate, threshold_db=-12.0, ratio=1.5, ceiling_dbfs=-0.5)
         except Exception:
             pass
+
+        # 7. Post-Glue Ghost Bus: re-add wet freeze tails so they survive limiting
+        for wet_tail, offset_f, avail in ghost_tails:
+            if avail > 0:
+                tail_avail = min(wet_tail.shape[1], avail)
+                if tail_avail > 0:
+                    output[:, offset_f : offset_f + tail_avail] += wet_tail[:, :tail_avail] * 0.7
 
     add_unique_note(
         notes,

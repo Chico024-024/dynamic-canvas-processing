@@ -1306,7 +1306,8 @@ class StudioRemixStrategy:
             t_breath = t_impact
         else:
             raw_breath = max(0.04, float(breath_end - breath_start)) if (breath_end > breath_start) else (bar_duration_b * 0.25)
-            breath_dur = max(0.08, min(t_impact * 0.25, raw_breath))
+            min_breath_s = 60.0 / max(40.0, tempo_b)  # 1 full beat minimum at Song B tempo
+            breath_dur = max(min_breath_s, min(t_impact * 0.25, raw_breath))
             t_breath = t_impact - breath_dur
 
         bridge_start_a = max(0.0, launchpad_a - t_impact)
@@ -1442,6 +1443,7 @@ class StudioRemixStrategy:
         """Build stem automations following the 12-bar Producer Matrix from Model 4 Argon.
 
         Adapts matrix size and phase boundaries based on available transition duration.
+        Robustly handles short durations by clamping all time/frequency parameters.
         """
         sample_rate = context.song_a.sample_rate
         nyquist_limit = (sample_rate / 2.0) * 0.95
@@ -1473,12 +1475,57 @@ class StudioRemixStrategy:
                 breath_dur = max(0.02, min(max_breath, raw_breath))
                 t_breath = t_impact - breath_dur
 
+        # --- Robust time boundary validation ---
+        # Ensure minimum separation between phase boundaries
+        min_gap = max(0.01, duration_s * 0.01)
+        if t_intro >= t_breath - 0.01:
+            t_intro = max(0.0, t_breath - max(0.01, duration_s * 0.05))
+        if t_breath >= t_impact - 0.01:
+            t_breath = max(t_intro + 0.01, t_impact - 0.01)
+        if t_impact >= duration_s - 0.01:
+            t_impact = max(t_breath + 0.01, duration_s - 0.01)
+
         eps_cut = min(0.005, max(0.001, (t_impact - t_breath) * 0.15)) if t_impact > t_breath else 0.005
 
-        # Helper to create guaranteed strictly increasing GainPoints within [0, duration_s]
+        # --- Robust helper functions with strict validation ---
+        def clamp_time(t: float) -> float:
+            """Clamp time to [eps, duration_s - eps] with small epsilon margin."""
+            eps = 1e-3
+            return max(eps, min(duration_s - eps, float(t)))
+
+        def safe_freq(freq: float) -> float:
+            """Clamp frequency to [25, nyquist_limit]."""
+            return max(25.0, min(nyquist_limit, float(freq)))
+
+        def make_effect(
+            kind: str,
+            start_s: float,
+            end_s: float,
+            start_hz: float = 1000.0,
+            end_hz: float = 1000.0,
+            params: dict | None = None,
+        ) -> EffectSpec | None:
+            """Create validated EffectSpec with guaranteed valid time/frequency ranges."""
+            s = clamp_time(start_s)
+            e = clamp_time(end_s)
+            if e <= s + 0.01:  # Minimum 10ms duration
+                return None
+            s_hz = safe_freq(start_hz)
+            e_hz = safe_freq(end_hz)
+            return EffectSpec(
+                kind=kind,
+                start_s=round(s, 6),
+                end_s=round(e, 6),
+                start_hz=round(s_hz, 2),
+                end_hz=round(e_hz, 2),
+                params=params,
+            )
+
         def gain_automation(raw_points: list[tuple[float, float]]) -> tuple[GainPoint, ...]:
+            """Create strictly increasing gain points strictly within (eps, duration_s - eps)."""
             if not raw_points:
-                return (GainPoint(0.0, 0.0), GainPoint(duration_s, 0.0))
+                eps = 1e-3
+                return (GainPoint(eps, 0.0), GainPoint(duration_s - eps, 0.0))
 
             sorted_pts = sorted(raw_points, key=lambda p: p[0])
             cfg_floor = floor_db
@@ -1486,35 +1533,40 @@ class StudioRemixStrategy:
 
             cleaned: list[GainPoint] = []
             for t, db in sorted_pts:
-                t_cl = max(0.0, min(duration_s, float(t)))
-                db_cl = max(cfg_floor, min(cfg_max, float(db)))
+                t_cl = clamp_time(t)
+                db_cl = max(floor_db, min(context.config.transition.max_automation_gain_db, float(db)))
                 cleaned.append(GainPoint(t_cl, db_cl))
 
+            # Deduplicate with time ordering
             deduped: list[GainPoint] = []
             for pt in cleaned:
                 if deduped and abs(pt.time_s - deduped[-1].time_s) <= 1e-4:
                     deduped[-1] = pt
-                elif not deduped or pt.time_s > deduped[-1].time_s:
+                elif not deduped or pt.time_s > deduped[-1].time_s + 1e-6:
                     deduped.append(pt)
 
+            # Ensure at least 2 points
             if len(deduped) < 2:
                 if not deduped:
-                    return (GainPoint(0.0, 0.0), GainPoint(duration_s, 0.0))
+                    eps = 1e-3
+                    return (GainPoint(1e-3, 0.0), GainPoint(duration_s - 1e-3, 0.0))
                 only = deduped[0]
-                if only.time_s > 0.0:
-                    deduped.insert(0, GainPoint(0.0, only.gain_db))
-                if only.time_s < duration_s:
-                    deduped.append(GainPoint(duration_s, only.gain_db))
+                if only.time_s > 1e-3:
+                    deduped.insert(0, GainPoint(1e-3, only.gain_db))
+                if only.time_s < duration_s - 1e-3:
+                    deduped.append(GainPoint(duration_s - 1e-3, only.gain_db))
 
-            if deduped[0].time_s > 1e-4:
-                deduped.insert(0, GainPoint(0.0, deduped[0].gain_db))
+            # Ensure first point at eps and last at duration_s - eps
+            eps = 1e-3
+            if deduped[0].time_s > eps:
+                deduped.insert(0, GainPoint(eps, deduped[0].gain_db))
             else:
-                deduped[0] = GainPoint(0.0, deduped[0].gain_db)
+                deduped[0] = GainPoint(eps, deduped[0].gain_db)
 
-            if deduped[-1].time_s < duration_s - 1e-4:
-                deduped.append(GainPoint(duration_s, deduped[-1].gain_db))
+            if deduped[-1].time_s < duration_s - eps:
+                deduped.append(GainPoint(duration_s - eps, deduped[-1].gain_db))
             else:
-                deduped[-1] = GainPoint(duration_s, deduped[-1].gain_db)
+                deduped[-1] = GainPoint(duration_s - eps, deduped[-1].gain_db)
 
             # Enforce strictly increasing timestamps
             final_pts: list[GainPoint] = [deduped[0]]
@@ -1525,35 +1577,12 @@ class StudioRemixStrategy:
                     final_pts[-1] = pt
 
             if len(final_pts) < 2:
-                final_pts = [GainPoint(0.0, final_pts[0].gain_db), GainPoint(duration_s, final_pts[0].gain_db)]
-            if final_pts[-1].time_s < duration_s:
-                final_pts.append(GainPoint(duration_s, final_pts[-1].gain_db))
+                eps = 1e-3
+                final_pts = [GainPoint(1e-3, 0.0), GainPoint(duration_s - 1e-3, 0.0)]
+            if final_pts[-1].time_s > duration_s - 1e-3:
+                final_pts[-1] = GainPoint(duration_s - 1e-3, final_pts[-1].gain_db)
 
             return tuple(final_pts)
-
-        # Helper to construct validated EffectSpec objects
-        def make_effect(
-            kind: str,
-            start_s: float,
-            end_s: float,
-            start_hz: float = 1000.0,
-            end_hz: float = 1000.0,
-            params: dict | None = None,
-        ) -> EffectSpec | None:
-            s = max(0.0, min(duration_s, float(start_s)))
-            e = max(0.0, min(duration_s, float(end_s)))
-            if e - s < 0.01:
-                return None
-            s_hz = max(25.0, min(nyquist_limit, float(start_hz)))
-            e_hz = max(25.0, min(nyquist_limit, float(end_hz)))
-            return EffectSpec(
-                kind=kind,
-                start_s=round(s, 6),
-                end_s=round(e, 6),
-                start_hz=round(s_hz, 2),
-                end_hz=round(e_hz, 2),
-                params=params,
-            )
 
         automations: list[StemAutomation] = []
 
@@ -1575,12 +1604,13 @@ class StudioRemixStrategy:
                 ])
                 effects = tuple(
                     e for e in [
-                        make_effect("zdf_highpass_sweep", t_intro, t_impact, 110.0, 450.0, params={"filter_type": "TPT_SVF", "resonance": 1.0}),
-                        make_effect("sidechain_duck", t_intro, t_impact, params={"source": "song_b_drums", "ratio": 4.0}),
+                        make_effect("zdf_highpass_sweep", t_intro, t_impact, 110.0, 450.0, params={"filter_type": "TPT_SVF", "resonance": 1.0, "stages": 2}),
+                        make_effect("sidechain_duck", t_intro, t_impact, params={"source": "song_b_drums", "attack_ms": 2.0, "release_ms": 50.0, "ratio": 4.0, "threshold_db": -12.0}),
                     ] if e is not None
                 )
                 reasoning.append(
-                    "Low-End Monogamy: Song A bass 0dB, HPF 110→450 Hz + 4:1 duck by B drums, muted at impact."
+                    f"Low-End Monogamy: Song A bass 0dB (Bars 1-2), "
+                    f"HPF 110→450 Hz + 4:1 duck by B drums (Bars 3-8), muted thereafter."
                 )
 
             elif stem_name == "drums":
