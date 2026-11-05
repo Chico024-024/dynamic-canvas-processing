@@ -407,7 +407,8 @@ def render_plan(
             audio_to_process = audio.samples[:, cue_start_frames:]
             warp_ratio_b = float(plan.metadata.get("warp_ratio_b", 1.0) or 1.0)
             if enable_tempo_lock and abs(warp_ratio_b - 1.0) > 0.005:
-                audio_to_process = time_stretch_phase_vocoder_numpy(audio_to_process, warp_ratio_b)
+                if automation.stem != "drums":
+                    audio_to_process = time_stretch_phase_vocoder_numpy(audio_to_process, warp_ratio_b)
 
         offset_frames = int(round(offset_s * sample_rate))
         transition_start_in_audio_s = plan.start_time_s - offset_s
@@ -435,7 +436,10 @@ def render_plan(
             except Exception:
                 key_audio_samples = None
 
-        bpm_val = float(plan.metadata.get("tempo_b", plan.metadata.get("tempo_a", 126.0)) or 126.0)
+        bpm_val = float(
+            plan.metadata.get("master_bpm", plan.metadata.get("tempo_b", plan.metadata.get("tempo_a", 126.0)))
+            or 126.0
+        )
 
         # Check if stem contains an FDN spatial freeze effect
         freeze_eff = next(
@@ -525,12 +529,6 @@ def render_plan(
             :, offset_frames : offset_frames + available
         ] += processed[:, :available] * gains[np.newaxis, :available]
 
-        # Add the isolated wet reverberant ghost tail to the mix
-        if wet_ghost_tail is not None:
-            w_avail = min(wet_ghost_tail.shape[1], total_frames - offset_frames)
-            if w_avail > 0:
-                output[:, offset_frames : offset_frames + w_avail] += wet_ghost_tail[:, :w_avail]
-
     # Inject bespoke synthesized transitional elements for Studio Remix (Song C)
     if plan.metadata.get("studio_remix"):
         t_impact_rel = float(plan.metadata.get("t_impact_s", plan.duration_s * (2.0 / 3.0)))
@@ -542,8 +540,9 @@ def render_plan(
             # 1. Reverse Crash Cymbal Swell into impact
             try:
                 crash_db = _feat_float("crash_level_db", -6.0)
+                crash_dur = min(max(1.5, (60.0 / bpm_val) * 2.0), t_impact_rel)
                 rev_crash = generate_reverse_crash(
-                    duration_s=min(1.5, t_impact_rel), sr=sample_rate, level_db=crash_db
+                    duration_s=crash_dur, sr=sample_rate, level_db=crash_db
                 )
                 crash_len = rev_crash.shape[1]
                 crash_start = max(0, impact_frame - crash_len)
@@ -634,14 +633,14 @@ def render_plan(
             except Exception:
                 pass
 
-        # 7. Post-Glue Ghost Bus: re-add wet freeze tails so they survive limiting
-        if enable_fdn_freeze:
-            ghost_gain = _feat_float("ghost_tail_gain", 0.7)
-            for wet_tail, offset_f, avail in ghost_tails:
-                if avail > 0:
-                    tail_avail = min(wet_tail.shape[1], avail)
-                    if tail_avail > 0:
-                        output[:, offset_f : offset_f + tail_avail] += wet_tail[:, :tail_avail] * ghost_gain
+    # Post-Glue Ghost Bus: inject wet freeze tails at calibrated ghost_gain so they survive limiting
+    if enable_fdn_freeze and ghost_tails:
+        ghost_gain = _feat_float("ghost_tail_gain", 0.7)
+        for wet_tail, offset_f, avail in ghost_tails:
+            if avail > 0:
+                tail_avail = min(wet_tail.shape[1], avail)
+                if tail_avail > 0:
+                    output[:, offset_f : offset_f + tail_avail] += wet_tail[:, :tail_avail] * ghost_gain
 
     add_unique_note(
         notes,

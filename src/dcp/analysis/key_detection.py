@@ -84,29 +84,32 @@ def _extract_chroma(
     hop = min(hop_length, window // 2)
     hop = max(1, hop)
 
+    nfft = window * 4  # 4x zero-padding for fine sub-bass frequency resolution
     _, _, spectrum = scipy_stft(
         mono,
         fs=sample_rate,
         window="hann",
         nperseg=window,
         noverlap=window - hop,
-        nfft=window,
+        nfft=nfft,
         boundary=None,
         padded=False,
     )
 
     magnitude = np.abs(spectrum) ** 2  # power spectrum
-    freqs = np.fft.rfftfreq(window, d=1.0 / sample_rate)
+    freqs = np.fft.rfftfreq(nfft, d=1.0 / sample_rate)
 
     chroma = np.zeros(12, dtype=np.float64)
     for bin_idx in range(1, len(freqs)):
         freq = freqs[bin_idx]
         if freq < 65.0 or freq > 2100.0:
             continue
-        midi = 69.0 + 12.0 * np.log2(freq / 440.0)
-        pitch_class = int(round(midi)) % 12
+        midi_f = 69.0 + 12.0 * np.log2(freq / 440.0)
+        pc = int(np.floor(midi_f)) % 12
+        w = 1.0 - (midi_f - np.floor(midi_f))  # spread energy across adjacent pitch classes
         energy = float(np.mean(magnitude[bin_idx, :]))
-        chroma[pitch_class] += energy
+        chroma[pc] += energy * w
+        chroma[(pc + 1) % 12] += energy * (1.0 - w)
 
     total = float(np.sum(chroma))
     if total > 1e-12:

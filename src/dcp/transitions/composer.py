@@ -50,6 +50,7 @@ def compose_optimal_bridge(
     ir_b: TrackMusicalIR,
     min_feasibility_threshold: float = 0.58,
     allow_pitch_shift_semitones: int = 2,
+    min_impact_bar_b: int = 0,
 ) -> ComposedBridgePlan:
     """
     Searches candidate (Launchpad Phrase A, Impact Phrase B, Hypothesis A, Hypothesis B)
@@ -59,7 +60,11 @@ def compose_optimal_bridge(
     n_p_a = len(ir_a.phrases)
     n_p_b = len(ir_b.phrases)
     cand_a = [p for p in ir_a.phrases if p.phrase_index >= max(0, int(0.45 * n_p_a))] or list(ir_a.phrases)
-    cand_b = [p for p in ir_b.phrases if 0 < p.phrase_index <= max(1, int(0.60 * n_p_b))] or list(ir_b.phrases)
+    cand_b = [
+        p for p in ir_b.phrases
+        if p.bar_start >= min_impact_bar_b
+        and 0 < p.phrase_index <= max(1, int(0.60 * n_p_b))
+    ] or [p for p in ir_b.phrases if p.bar_start >= min_impact_bar_b] or list(ir_b.phrases)
 
     best_plan: ComposedBridgePlan | None = None
     best_score = -1e9
@@ -151,7 +156,7 @@ def compose_optimal_bridge(
 
                     elif h_a.relation_to_base == "detected_primary" and h_b.relation_to_base == "detected_primary":
                         # Atemporal FDN Freeze Wash when tempos cannot be beat-mixed (e.g., 27% delta)
-                        if best_harm >= 0.65 and p_a.vocal_resolves_at_end:
+                        if best_harm >= 0.65 and p_a.vocal_resolves_at_end and accent_sim >= 0.40:
                             mode = "ATEMPORAL_WASH_HANDOFF"
                             arch = "GHOST_WASH_SUSPENSION"
                             breath_beats = 2

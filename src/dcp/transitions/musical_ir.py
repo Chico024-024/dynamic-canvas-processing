@@ -183,7 +183,7 @@ def build_track_musical_ir(
             parent_hypothesis_id="primary",
             bpm=base_bpm * (4.0 / 3.0),
             base_detection_confidence=float(base_confidence),
-            metrical_plausibility_weight=0.55,
+            metrical_plausibility_weight=0.75,
             beat_times_s=tuple(float(t) for t in base_beats),
             downbeat_times_s=tuple(float(t) for t in downbeats),
             accent_profile_16=accent_tuple,

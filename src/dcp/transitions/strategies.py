@@ -1158,7 +1158,8 @@ class StudioRemixStrategy:
                     sr=context.song_b.sample_rate,
                     base_confidence=context.analysis_b.tempo_confidence or 0.85,
                 )
-                candidate_plan = compose_optimal_bridge(ir_a, ir_b)
+                min_impact_bar = 4 if len(downbeats_b) > 8 else 0
+                candidate_plan = compose_optimal_bridge(ir_a, ir_b, min_impact_bar_b=min_impact_bar)
                 if not candidate_plan.is_viable:
                     return _conservative_plan(
                         context,
@@ -1268,7 +1269,7 @@ class StudioRemixStrategy:
         if archetype == "POLYRHYTHMIC_4_3_PIVOT":
             # For 4:3 pivot, master BPM aligns with 4:3 dotted metric grid
             master_bpm = tempo_a * (4.0 / 3.0) if tempo_a < tempo_b else tempo_a * (3.0 / 4.0)
-            warp_ratio_b = master_bpm / tempo_b
+            warp_ratio_b = tempo_b / master_bpm
         else:
             master_bpm = (tempo_a + tempo_b) * 0.5
             warp_ratio_b = 1.0
@@ -1318,7 +1319,31 @@ class StudioRemixStrategy:
             t_breath = max(0.0, t_impact - breath_dur) if breath_dur > 0 else t_impact
 
         # Song B Cue Offset: aligns impact_b with t_impact
-        cue_offset_b_s = max(0.0, impact_b - (t_impact * (tempo_b / master_bpm)))
+        # Vocoder identity: event at source s lands at output s * warp_ratio_b
+        # Output t_impact comes from source cue_offset_b_s + t_impact / warp_stretch
+        warp_stretch = warp_ratio_b if abs(warp_ratio_b - 1.0) > 1e-3 else 1.0
+        cue_unclamped = impact_b - (t_impact / warp_stretch)
+
+        phase_locked = True
+        grid_reanchored = False
+        if cue_unclamped < -1e-6:
+            warnings.append(
+                f"Impact phrase at {impact_b:.2f}s cannot reach the {lead_in_bars}-bar lead-in; "
+                "re-anchoring grid and capping lead-in to fit."
+            )
+            max_lead_in = impact_b * warp_stretch
+            t_impact = max(0.35 * duration, min(t_impact, max_lead_in))
+            t_intro = t_impact * 0.5
+            t_breath = max(0.0, t_impact - breath_dur) if breath_dur > 0 else t_impact
+            bridge_start_a = max(0.0, launchpad_a - t_impact)
+            if bridge_start_a + duration > context.song_a.duration_s:
+                bridge_start_a = max(0.0, context.song_a.duration_s - duration)
+            cue_unclamped = impact_b - (t_impact / warp_stretch)
+            grid_reanchored = True
+            if cue_unclamped < -1e-6:
+                phase_locked = False
+
+        cue_offset_b_s = max(0.0, cue_unclamped)
         if cue_offset_b_s + duration > context.song_b.duration_s:
             cue_offset_b_s = max(0.0, context.song_b.duration_s - duration)
 
@@ -1398,7 +1423,8 @@ class StudioRemixStrategy:
             "warp_ratio_b": round(warp_ratio_b, 6),
             "bass_root_b": int(bass_root_val),
             "anchor_confidence": round(anchor_conf, 4),
-            "phase_locked": True,
+            "phase_locked": bool(phase_locked),
+            "grid_reanchored": bool(grid_reanchored),
             "low_end_monogamy": True,
             "zdf_filter_sweeps": True,
             "ghost_resolution": True,
@@ -1757,8 +1783,6 @@ class StudioRemixStrategy:
                     e for e in [
                         make_effect("zdf_highpass", 0.0, t_intro, 220.0, 220.0),
                         make_effect("zdf_highpass_sweep", t_intro, t_breath, 220.0, 90.0),
-                        make_effect("sidechain_trigger", t_impact, duration_s, params={"target": "song_a_vocals", "ratio": 8.0}),
-                        make_effect("sidechain_trigger", t_impact, duration_s, params={"target": "song_a_other", "ratio": 4.0}),
                     ] if e is not None
                 )
                 reasoning.append(
