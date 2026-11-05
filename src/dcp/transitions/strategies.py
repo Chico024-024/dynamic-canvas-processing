@@ -1158,7 +1158,14 @@ class StudioRemixStrategy:
                     sr=context.song_b.sample_rate,
                     base_confidence=context.analysis_b.tempo_confidence or 0.85,
                 )
-                min_impact_bar = 4 if len(downbeats_b) > 8 else 0
+                # Estimate needed lead-in bars in Song B so impact_b >= t_impact
+                est_bar_a = 4.0 * 60.0 / max(20.0, context.analysis_a.tempo_bpm or 120.0)
+                est_bar_b = 4.0 * 60.0 / max(20.0, context.analysis_b.tempo_bpm or 120.0)
+                est_eff_bar = 2.0 / (1.0 / max(1e-3, est_bar_a) + 1.0 / max(1e-3, est_bar_b))
+                est_t_impact = 11.0 * est_eff_bar
+                needed_b_bars = int(np.ceil(est_t_impact / max(0.5, est_bar_b)))
+                max_avail_bar = max(0, len(downbeats_b) - 4)
+                min_impact_bar = max(0, min(needed_b_bars, max_avail_bar))
                 candidate_plan = compose_optimal_bridge(ir_a, ir_b, min_impact_bar_b=min_impact_bar)
                 if not candidate_plan.is_viable:
                     return _conservative_plan(
@@ -1267,9 +1274,15 @@ class StudioRemixStrategy:
 
         # Determine master BPM and warp ratio for Song B
         if archetype == "POLYRHYTHMIC_4_3_PIVOT":
-            # For 4:3 pivot, master BPM aligns with 4:3 dotted metric grid
-            master_bpm = tempo_a * (4.0 / 3.0) if tempo_a < tempo_b else tempo_a * (3.0 / 4.0)
-            warp_ratio_b = tempo_b / master_bpm
+            # For 4:3 pivot, hypothesis_a is already the pivot tempo verbatim (e.g. 124.0 for 93 * 4/3)
+            if composed_plan is not None and hasattr(composed_plan, "hypothesis_a"):
+                master_bpm = float(composed_plan.hypothesis_a.bpm)
+            else:
+                master_bpm = tempo_a * (4.0 / 3.0) if tempo_a < tempo_b else tempo_a * (3.0 / 4.0)
+
+            # Coherent Time Model: No-warp handoff
+            # Song B enters at native tempo post-impact; bridge lead-in runs on master_bpm pivot grid.
+            warp_ratio_b = 1.0
         else:
             master_bpm = (tempo_a + tempo_b) * 0.5
             warp_ratio_b = 1.0
@@ -1331,13 +1344,16 @@ class StudioRemixStrategy:
                 f"Impact phrase at {impact_b:.2f}s cannot reach the {lead_in_bars}-bar lead-in; "
                 "re-anchoring grid and capping lead-in to fit."
             )
-            max_lead_in = impact_b * warp_stretch
-            t_impact = max(0.35 * duration, min(t_impact, max_lead_in))
-            t_intro = t_impact * 0.5
-            t_breath = max(0.0, t_impact - breath_dur) if breath_dur > 0 else t_impact
+            # Cap lead-in first to what Song B can reach
+            max_lead_in = max(0.0, impact_b * warp_stretch)
+            t_impact = min(t_impact, max_lead_in)
             bridge_start_a = max(0.0, launchpad_a - t_impact)
             if bridge_start_a + duration > context.song_a.duration_s:
                 bridge_start_a = max(0.0, context.song_a.duration_s - duration)
+            # Re-anchor: keep launchpad_a - bridge_start_a matched to t_impact within max_lead_in
+            t_impact = min(max_lead_in, max(0.0, launchpad_a - bridge_start_a))
+            t_intro = t_impact * 0.5
+            t_breath = max(0.0, t_impact - breath_dur) if breath_dur > 0 else t_impact
             cue_unclamped = impact_b - (t_impact / warp_stretch)
             grid_reanchored = True
             if cue_unclamped < -1e-6:
@@ -1346,6 +1362,21 @@ class StudioRemixStrategy:
         cue_offset_b_s = max(0.0, cue_unclamped)
         if cue_offset_b_s + duration > context.song_b.duration_s:
             cue_offset_b_s = max(0.0, context.song_b.duration_s - duration)
+
+        grid_bpm_pre = master_bpm
+        grid_bpm_post = tempo_b / warp_stretch
+
+        l_a = (
+            context.analysis_a.loudness_lufs
+            if context.analysis_a and context.analysis_a.loudness_lufs is not None
+            else (context.analysis_a.rms_dbfs if context.analysis_a else -14.0)
+        )
+        l_b = (
+            context.analysis_b.loudness_lufs
+            if context.analysis_b and context.analysis_b.loudness_lufs is not None
+            else (context.analysis_b.rms_dbfs if context.analysis_b else -14.0)
+        )
+        loudness_comp_db = float(np.clip(l_a - l_b, -6.0, 6.0)) if (l_a is not None and l_b is not None) else 0.0
 
         floor_db = context.config.transition.fade_floor_db
 
@@ -1420,6 +1451,10 @@ class StudioRemixStrategy:
             "tempo_a": round(tempo_a, 3),
             "tempo_b": round(tempo_b, 3),
             "master_bpm": round(master_bpm, 3),
+            "grid_bpm_pre": round(grid_bpm_pre, 3),
+            "grid_bpm_post": round(grid_bpm_post, 3),
+            "effective_bar_s": round(effective_bar_s, 6),
+            "loudness_compensation_db": round(loudness_comp_db, 2),
             "warp_ratio_b": round(warp_ratio_b, 6),
             "bass_root_b": int(bass_root_val),
             "anchor_confidence": round(anchor_conf, 4),

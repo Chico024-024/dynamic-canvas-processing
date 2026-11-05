@@ -64,7 +64,12 @@ def compose_optimal_bridge(
         p for p in ir_b.phrases
         if p.bar_start >= min_impact_bar_b
         and 0 < p.phrase_index <= max(1, int(0.60 * n_p_b))
-    ] or [p for p in ir_b.phrases if p.bar_start >= min_impact_bar_b] or list(ir_b.phrases)
+    ] or [
+        p for p in ir_b.phrases
+        if p.bar_start >= min_impact_bar_b and p.phrase_index > 0
+    ] or [
+        p for p in ir_b.phrases if p.phrase_index > 0
+    ] or list(ir_b.phrases)
 
     best_plan: ComposedBridgePlan | None = None
     best_score = -1e9

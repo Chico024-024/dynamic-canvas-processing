@@ -407,8 +407,7 @@ def render_plan(
             audio_to_process = audio.samples[:, cue_start_frames:]
             warp_ratio_b = float(plan.metadata.get("warp_ratio_b", 1.0) or 1.0)
             if enable_tempo_lock and abs(warp_ratio_b - 1.0) > 0.005:
-                if automation.stem != "drums":
-                    audio_to_process = time_stretch_phase_vocoder_numpy(audio_to_process, warp_ratio_b)
+                audio_to_process = time_stretch_phase_vocoder_numpy(audio_to_process, warp_ratio_b)
 
         offset_frames = int(round(offset_s * sample_rate))
         transition_start_in_audio_s = plan.start_time_s - offset_s
@@ -436,10 +435,15 @@ def render_plan(
             except Exception:
                 key_audio_samples = None
 
-        bpm_val = float(
-            plan.metadata.get("master_bpm", plan.metadata.get("tempo_b", plan.metadata.get("tempo_a", 126.0)))
+        bpm_pre = float(
+            plan.metadata.get("grid_bpm_pre", plan.metadata.get("master_bpm", plan.metadata.get("tempo_a", 126.0)))
             or 126.0
         )
+        bpm_post = float(
+            plan.metadata.get("grid_bpm_post", plan.metadata.get("tempo_b", 126.0))
+            or 126.0
+        )
+        bpm_val = bpm_pre
 
         # Check if stem contains an FDN spatial freeze effect
         freeze_eff = next(
@@ -522,12 +526,18 @@ def render_plan(
             floor_db=cfg.transition.fade_floor_db,
         )
 
+        stem_gain_multiplier = 1.0
+        if plan.metadata.get("studio_remix") and automation.source == "B":
+            comp_db = float(plan.metadata.get("loudness_compensation_db", 0.0) or 0.0)
+            if abs(comp_db) > 0.01:
+                stem_gain_multiplier = 10.0 ** (comp_db / 20.0)
+
         available = min(audio_to_process.shape[1], total_frames - offset_frames)
         if available <= 0:
             continue
         output[
             :, offset_frames : offset_frames + available
-        ] += processed[:, :available] * gains[np.newaxis, :available]
+        ] += processed[:, :available] * (gains[np.newaxis, :available] * stem_gain_multiplier)
 
     # Inject bespoke synthesized transitional elements for Studio Remix (Song C)
     if plan.metadata.get("studio_remix"):
@@ -537,10 +547,11 @@ def render_plan(
         impact_frame = int(round((plan.start_time_s + t_impact_rel) * sample_rate))
 
         if enable_generative_assets:
-            # 1. Reverse Crash Cymbal Swell into impact
+            # 1. Reverse Crash Cymbal Swell into impact (scaled dynamically to bpm_pre)
             try:
                 crash_db = _feat_float("crash_level_db", -6.0)
-                crash_dur = min(max(1.5, (60.0 / bpm_val) * 2.0), t_impact_rel)
+                bar_dur_pre = (60.0 / bpm_pre) * 4.0
+                crash_dur = min(t_impact_rel, max(0.75, bar_dur_pre * 0.5))
                 rev_crash = generate_reverse_crash(
                     duration_s=crash_dur, sr=sample_rate, level_db=crash_db
                 )
@@ -566,12 +577,12 @@ def render_plan(
             except Exception:
                 pass
 
-            # 3. Noise Riser during build-up
+            # 3. Noise Riser during build-up (keyed to pre-impact grid)
             try:
                 riser_dur = max(0.5, t_breath_rel - t_intro_rel)
                 riser_db = _feat_float("riser_level_db", -8.0)
                 riser = generate_noise_riser(
-                    duration_s=riser_dur, sr=sample_rate, level_db=riser_db, sidechain_bpm=bpm_val
+                    duration_s=riser_dur, sr=sample_rate, level_db=riser_db, sidechain_bpm=bpm_pre
                 )
                 riser_start = int(round((plan.start_time_s + t_intro_rel) * sample_rate))
                 riser_avail = min(riser.shape[1], total_frames - riser_start)
@@ -580,7 +591,7 @@ def render_plan(
             except Exception:
                 pass
 
-        # 4. Syncopated Vocal Chops from RESOLVING PHRASE ONLY (not full stem)
+        # 4. Syncopated Vocal Chops from RESOLVING PHRASE ONLY (keyed to post-impact grid)
         if enable_vocal_chops:
             try:
                 a_stems = sources["a"][1]
@@ -592,7 +603,7 @@ def render_plan(
                     res_dur = max(0.5, plan.duration_s - t_impact_rel)
                     chop_db = _feat_float("vocal_chop_level_db", -6.0)
                     chops = generate_vocal_chops(
-                        vocal_tail, sr=sample_rate, bpm=bpm_val, duration_s=res_dur, level_db=chop_db
+                        vocal_tail, sr=sample_rate, bpm=bpm_post, duration_s=res_dur, level_db=chop_db
                     )
                     chops_avail = min(chops.shape[1], total_frames - impact_frame)
                     if chops_avail > 0 and impact_frame >= 0:
@@ -600,7 +611,7 @@ def render_plan(
             except Exception:
                 pass
 
-        # 5. Half-Time Drum Re-grooving pocket during post-impact bridge
+        # 5. Half-Time Drum Re-grooving pocket during post-impact bridge (keyed to post-impact grid)
         if enable_drum_regroove:
             try:
                 b_stems = sources["b"][1]
@@ -608,7 +619,7 @@ def render_plan(
                     raw_drums = b_stems["drums"].samples
                     pocket_dur = min(8.0, max(1.0, plan.duration_s - t_impact_rel))
                     regrooved = regroove_drums_half_time(
-                        raw_drums, sr=sample_rate, bpm=bpm_val, duration_s=pocket_dur
+                        raw_drums, sr=sample_rate, bpm=bpm_post, duration_s=pocket_dur
                     )
                     from scipy import signal
                     sos_hp = signal.butter(

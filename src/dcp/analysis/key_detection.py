@@ -108,8 +108,18 @@ def _extract_chroma(
         pc = int(np.floor(midi_f)) % 12
         w = 1.0 - (midi_f - np.floor(midi_f))  # spread energy across adjacent pitch classes
         energy = float(np.mean(magnitude[bin_idx, :]))
-        chroma[pc] += energy * w
-        chroma[(pc + 1) % 12] += energy * (1.0 - w)
+        # Frequency weighting: fundamentals below 350 Hz prioritize over upper harmonic overtones
+        f_weight = 1.0 / np.sqrt(max(65.0, freq) / 65.0)
+        weighted_energy = energy * f_weight
+        chroma[pc] += weighted_energy * w
+        chroma[(pc + 1) % 12] += weighted_energy * (1.0 - w)
+
+    # Harmonic foldback: Reinforce fundamental pitch class from 3rd harmonic (perfect fifth)
+    folded = chroma.copy()
+    for pc in range(12):
+        fifth_pc = (pc + 7) % 12
+        folded[pc] += 0.20 * chroma[fifth_pc]
+    chroma = folded
 
     total = float(np.sum(chroma))
     if total > 1e-12:

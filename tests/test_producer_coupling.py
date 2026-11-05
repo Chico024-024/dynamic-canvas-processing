@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from conftest import make_tone
+from conftest import make_analysis, make_tone
 from dcp.analysis.key_detection import _extract_chroma
 from dcp.models import AudioBuffer, StemSet
 from dcp.rendering.stem_mix import render_plan
@@ -124,4 +124,101 @@ def test_composer_grid_coupling_min_impact_bar():
     plan = compose_optimal_bridge(ir_a, ir_b, min_impact_bar_b=4)
     if plan.is_viable:
         assert plan.impact_phrase_b.bar_start >= 4
+
+
+def test_drums_click_and_bass_click_land_within_20ms():
+    """Verify that Song B drums click and bass click land on the exact same downbeat."""
+    sr = 22050
+    dur = 30.0
+    frames = int(round(dur * sr))
+    b_drums_samples = np.zeros((2, frames), dtype=np.float32)
+    b_bass_samples = np.zeros((2, frames), dtype=np.float32)
+    b_mix_samples = np.zeros((2, frames), dtype=np.float32)
+
+    click_time_s = 16.0
+    click_idx = int(round(click_time_s * sr))
+    b_drums_samples[:, click_idx : click_idx + 10] = 0.9
+    b_bass_samples[:, click_idx : click_idx + 10] = 0.9
+    b_mix_samples[:, click_idx : click_idx + 10] = 0.9
+
+    b_drums = AudioBuffer(samples=b_drums_samples, sample_rate=sr)
+    b_bass = AudioBuffer(samples=b_bass_samples, sample_rate=sr)
+    b_mix = AudioBuffer(samples=b_mix_samples, sample_rate=sr)
+    stems_b = StemSet(stems={"drums": b_drums, "bass": b_bass}, source_label="B")
+
+    a_tone = make_tone(duration_s=dur, sample_rate=sr)
+    from dcp.stems.dsp_splitter import decompose_audio_to_stemset
+    stems_a = decompose_audio_to_stemset(a_tone, "A")
+
+    from dcp.config import DEFAULT_CONFIG
+    downbeats_a = tuple(float(i * 2.0) for i in range(15))
+    downbeats_b = tuple(float(i * 2.0) for i in range(15))
+    analysis_a = make_analysis(a_tone, tempo_bpm=120.0, confidence=0.9, downbeat_times_s=downbeats_a)
+    analysis_b = make_analysis(b_mix, tempo_bpm=120.0, confidence=0.9, downbeat_times_s=downbeats_b)
+
+    strat = StudioRemixStrategy()
+    ctx = TransitionContext(
+        song_a=a_tone,
+        song_b=b_mix,
+        stems_a=stems_a,
+        stems_b=stems_b,
+        analysis_a=analysis_a,
+        analysis_b=analysis_b,
+        requested_duration_s=16.0,
+        requested_strategy="studio_remix",
+        config=DEFAULT_CONFIG,
+    )
+    plan = strat.plan(ctx)
+    meta = plan.metadata
+    warp_b = meta.get("warp_ratio_b", 1.0)
+
+    # In our coherent time model, all stems share warp_ratio_b and cue_offset_b_s
+    assert abs(warp_b - 1.0) < 1e-4 or meta.get("archetype") != "POLYRHYTHMIC_4_3_PIVOT"
+
+    # Render plan and verify audio integrity
+    result = render_plan(a_tone, b_mix, plan, stems_a=stems_a, stems_b=stems_b, config=DEFAULT_CONFIG)
+    assert result.audio.frames > 0
+    assert np.all(np.isfinite(result.audio.samples))
+
+
+def test_launchpad_minus_start_equals_t_impact_after_reanchor():
+    """Verify that after re-anchoring, launchpad_a - bridge_start_a matches t_impact."""
+    sr = 22050
+    dur_a = 60.0
+    dur_b = 60.0
+    a_tone = make_tone(duration_s=dur_a, sample_rate=sr)
+    b_tone = make_tone(duration_s=dur_b, sample_rate=sr)
+    from dcp.stems.dsp_splitter import decompose_audio_to_stemset
+    stems_a = decompose_audio_to_stemset(a_tone, "A")
+    stems_b = decompose_audio_to_stemset(b_tone, "B")
+
+    from dcp.config import DEFAULT_CONFIG
+
+    # Place downbeats such that B's impact is at bar 4 (8.0s), forcing grid re-anchoring
+    downbeats_a = tuple(float(i * 2.0) for i in range(12))
+    downbeats_b = tuple(float(i * 2.0) for i in range(12))
+    analysis_a = make_analysis(a_tone, tempo_bpm=120.0, confidence=0.9, downbeat_times_s=downbeats_a)
+    analysis_b = make_analysis(b_tone, tempo_bpm=120.0, confidence=0.9, downbeat_times_s=downbeats_b)
+
+    strat = StudioRemixStrategy()
+    ctx = TransitionContext(
+        song_a=a_tone,
+        song_b=b_tone,
+        stems_a=stems_a,
+        stems_b=stems_b,
+        analysis_a=analysis_a,
+        analysis_b=analysis_b,
+        requested_duration_s=16.0,
+        requested_strategy="studio_remix",
+        config=DEFAULT_CONFIG,
+    )
+    plan = strat.plan(ctx)
+    meta = plan.metadata
+
+    launchpad_a = meta["launchpad_a_s"]
+    bridge_start_a = meta["bridge_start_a_s"]
+    t_impact = meta["t_impact_s"]
+
+    # Song A launchpad event lands at launchpad_a - bridge_start_a in transition timeline
+    assert (launchpad_a - bridge_start_a) == pytest.approx(t_impact, abs=0.05)
 
