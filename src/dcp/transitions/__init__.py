@@ -1,7 +1,7 @@
 """Transition planning: models, curves, strategies, and orchestration."""
 
 from .context import TransitionContext
-from .curves import db_to_gain, equal_power_fades, gain_to_db, interpolate_gain
+from .curves import crossfade_envelopes, db_to_gain, equal_power_fades, gain_to_db, interpolate_gain
 from .plan import (
     EffectSpec,
     GainPoint,
@@ -78,6 +78,7 @@ __all__ = [
     "build_core_registry",
     "calculate_phase_locked_cue_offset",
     "candidate_features",
+    "crossfade_envelopes",
     "db_to_gain",
     "equal_power_fades",
     "evaluate_candidate",

@@ -25,7 +25,6 @@ import numpy as np
 from ..audio_io import save_audio
 from ..config import DCPConfig
 from ..models import AudioBuffer, StemSet
-from ..rendering import render_plan
 from ..transitions import TransitionParams, TransitionPlan
 from ..validation import validate_audio
 from .context import TransitionContext
@@ -280,6 +279,8 @@ class TransitionCache:
         )
 
         # Render the transition
+        from ..rendering.stem_mix import render_plan
+
         render_result = render_plan(
             song_a,
             song_b,
@@ -298,6 +299,8 @@ class TransitionCache:
         )
 
         # Validate the rendered audio
+        from ..rendering.stem_mix import rendered_duration_s
+
         expected_duration = rendered_duration_s(song_a, song_b, plan)
         validation_report = validate_audio(
             render_result.audio,
@@ -408,8 +411,6 @@ def get_cached_transition(
     return None
 
 
-# Import rendered_duration_s from rendering module
-from ..rendering import rendered_duration_s
 
 
 __all__ = [

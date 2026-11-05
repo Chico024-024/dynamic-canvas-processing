@@ -53,7 +53,17 @@ def _version_of(distribution: str) -> str:
 def _config_for_cli(args: argparse.Namespace) -> DCPConfig:
     prevent = not bool(getattr(args, "no_limit", False))
     render = replace(DEFAULT_CONFIG.render, prevent_clipping=prevent)
-    return replace(DEFAULT_CONFIG, render=render)
+    dcp_feat = replace(
+        DEFAULT_CONFIG.dcp_features,
+        enable_generative_assets=not bool(getattr(args, "no_generative", False)),
+        enable_vocal_chops=not bool(getattr(args, "no_vocal_chops", False)),
+        enable_drum_regroove=not bool(getattr(args, "no_drum_regroove", False)),
+        enable_fdn_freeze=not bool(getattr(args, "no_fdn_freeze", False)),
+        enable_zdf_sweeps=not bool(getattr(args, "no_zdf_sweeps", False)),
+        enable_sidechain_duck=not bool(getattr(args, "no_sidechain", False)),
+        enable_master_glue=not bool(getattr(args, "no_master_glue", False)),
+    )
+    return replace(DEFAULT_CONFIG, render=render, dcp_features=dcp_feat)
 
 
 def _describe_analysis(analysis: TrackAnalysis) -> str:
@@ -205,8 +215,15 @@ def _cmd_crossfade(args: argparse.Namespace) -> int:
     config = _config_for_cli(args)
     song_a = load_audio(args.song_a)
     song_b = load_audio(args.song_b)
+    curve = getattr(args, "curve", "equal_power")
+    trim_silence = bool(getattr(args, "trim_silence", False))
     result = render_crossfade(
-        song_a, song_b, overlap_s=args.overlap, config=config
+        song_a,
+        song_b,
+        overlap_s=args.overlap,
+        curve=curve,
+        trim_silence=trim_silence,
+        config=config,
     )
     save_audio(
         args.output,
@@ -214,7 +231,7 @@ def _cmd_crossfade(args: argparse.Namespace) -> int:
         subtype=config.render.wav_subtype,
         allow_clipping=not config.render.prevent_clipping,
     )
-    expected = song_a.duration_s + song_b.duration_s - args.overlap
+    expected = result.audio.duration_s if trim_silence else (song_a.duration_s + song_b.duration_s - args.overlap)
     report = validate_audio(
         result.audio,
         expected_duration_s=expected,
@@ -226,6 +243,57 @@ def _cmd_crossfade(args: argparse.Namespace) -> int:
     for note in result.notes:
         print(f"Note: {note}")
     print(report.format_text())
+    return 0 if report.passed else 1
+
+
+def _cmd_automix(args: argparse.Namespace) -> int:
+    from .automix import render_automix
+    from .config import AutomixConfig
+
+    config = _config_for_cli(args)
+    amx_cfg = AutomixConfig(
+        enabled=True,
+        default_duration_s=args.duration,
+        beat_align=not bool(getattr(args, "no_beat_align", False)),
+        downbeat_phase_lock=not bool(getattr(args, "no_phase_lock", False)),
+        tempo_sync=not bool(getattr(args, "no_tempo_sync", False)),
+        smart_transition_points=not bool(getattr(args, "no_smart_points", False)),
+        bass_swap=not bool(getattr(args, "no_bass_swap", False)),
+        loudness_match=not bool(getattr(args, "no_loudness_match", False)),
+        curve=getattr(args, "curve", "s_curve"),
+    )
+    song_a = load_audio(args.song_a)
+    song_b = load_audio(args.song_b)
+    result = render_automix(
+        song_a,
+        song_b,
+        duration_s=args.duration,
+        config=config,
+        automix_config=amx_cfg,
+    )
+    save_audio(
+        args.output,
+        result.audio,
+        subtype=config.render.wav_subtype,
+        allow_clipping=not config.render.prevent_clipping,
+    )
+    report = validate_audio(
+        result.audio,
+        expected_duration_s=result.audio.duration_s,
+        expected_sample_rate=song_a.sample_rate,
+        expected_channels=song_a.channels,
+    )
+    print(f"Wrote Automix transition: {args.output}")
+    print(
+        f"Duration: {result.audio.duration_s:.3f}s "
+        f"(overlap {result.plan.duration_s:.2f}s, {result.plan.bars} bar(s))"
+    )
+    for note in result.notes:
+        print(f"Note: {note}")
+    print(report.format_text())
+    if getattr(args, "plan_json", None):
+        path = _write_json(args.plan_json, result.plan.to_dict())
+        print(f"Automix Plan JSON: {path}")
     return 0 if report.passed else 1
 
 
@@ -709,7 +777,7 @@ def _build_parser() -> argparse.ArgumentParser:
     synthesize.set_defaults(func=_cmd_synthesize)
 
     crossfade = subparsers.add_parser(
-        "crossfade", help="render a conventional equal-power crossfade"
+        "crossfade", help="render a conventional full-mix volume crossfade"
     )
     crossfade.add_argument("song_a", help="Song A audio file")
     crossfade.add_argument("song_b", help="Song B audio file")
@@ -718,11 +786,48 @@ def _build_parser() -> argparse.ArgumentParser:
         "--overlap", type=float, default=8.0, help="overlap in seconds"
     )
     crossfade.add_argument(
+        "--curve",
+        choices=("equal_power", "s_curve", "linear"),
+        default="equal_power",
+        help="crossfade envelope shape (default: equal_power)",
+    )
+    crossfade.add_argument(
+        "--trim-silence",
+        action="store_true",
+        help="trim trailing silence on Song A and leading silence on Song B",
+    )
+    crossfade.add_argument(
         "--no-limit",
         action="store_true",
         help="do not apply the automatic master gain that prevents clipping",
     )
     crossfade.set_defaults(func=_cmd_crossfade)
+
+    automix = subparsers.add_parser(
+        "automix",
+        help="render an Apple Music-style continuous Automix transition (beat/tempo/bass/loudness aligned)",
+    )
+    automix.add_argument("song_a", help="Song A audio file")
+    automix.add_argument("song_b", help="Song B audio file")
+    automix.add_argument("output", help="output WAV path")
+    automix.add_argument(
+        "--duration", type=float, default=8.0, help="target overlap duration in seconds"
+    )
+    automix.add_argument(
+        "--curve",
+        choices=("s_curve", "equal_power", "linear"),
+        default="s_curve",
+        help="mid/high blend envelope curve (default: s_curve)",
+    )
+    automix.add_argument("--no-beat-align", action="store_true", help="disable bar/beat quantization")
+    automix.add_argument("--no-phase-lock", action="store_true", help="disable downbeat-to-downbeat phase lock")
+    automix.add_argument("--no-tempo-sync", action="store_true", help="disable bounded ±8%% tempo stretching")
+    automix.add_argument("--no-smart-points", action="store_true", help="disable smart outro/intro boundary detection")
+    automix.add_argument("--no-bass-swap", action="store_true", help="disable low-end crossover swap")
+    automix.add_argument("--no-loudness-match", action="store_true", help="disable RMS/LUFS loudness matching")
+    automix.add_argument("--no-limit", action="store_true", help="disable automatic peak ceiling limiting")
+    automix.add_argument("--plan-json", help="write the Automix plan as JSON")
+    automix.set_defaults(func=_cmd_automix)
 
     render = subparsers.add_parser(
         "render", help="plan and render a DCP transition"
@@ -740,8 +845,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--strategy",
         default="auto",
         help=(
-            "auto, crossfade, stem_level, rhythmic, atmospheric, conservative, "
-            "optimized, or an installed Advanced strategy"
+            "auto, studio_remix, stem_level, rhythmic, atmospheric, conservative, "
+            "optimized, crossfade, or an installed Advanced strategy"
         ),
     )
     render.add_argument(
@@ -761,6 +866,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not apply the automatic master gain that prevents clipping",
     )
+    render.add_argument("--no-generative", action="store_true", help="disable DCP generative risers/crashes/808s")
+    render.add_argument("--no-vocal-chops", action="store_true", help="disable DCP vocal chop sampler")
+    render.add_argument("--no-drum-regroove", action="store_true", help="disable DCP half-time drum re-groover")
+    render.add_argument("--no-fdn-freeze", action="store_true", help="disable DCP FDN reverb freeze ghost tail")
+    render.add_argument("--no-zdf-sweeps", action="store_true", help="disable DCP ZDF filter sweeps")
+    render.add_argument("--no-sidechain", action="store_true", help="disable DCP sidechain ducking")
+    render.add_argument("--no-master-glue", action="store_true", help="disable DCP master bus glue compressor")
     render.add_argument("--plan-json", help="write the transition plan as JSON")
     render.add_argument("--report-json", help="write a full render report as JSON")
     render.add_argument(

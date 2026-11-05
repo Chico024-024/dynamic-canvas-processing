@@ -14,7 +14,8 @@ import re
 import sys
 import threading
 import webbrowser
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+from dataclasses import replace
+from http.server import HTTPServer, SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
@@ -26,7 +27,8 @@ import numpy as np
 
 from dcp.audio_io import load_audio, save_audio
 from dcp.analysis import analyze_track_with_backend
-from dcp.config import DEFAULT_CONFIG, DCPConfig
+from dcp.automix import render_automix
+from dcp.config import AutomixConfig, CrossfadeConfig, DCPConfig, DCPFeatureConfig, DEFAULT_CONFIG
 from dcp.models import AudioBuffer
 from dcp.transitions import TransitionContext
 from dcp.transitions.strategies import build_core_registry
@@ -107,19 +109,50 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
             self._send_json_response({"error": "Not found"}, status=404)
 
     def _serve_audio(self, filename: str) -> None:
-        """Serve audio files from the output directory."""
-        file_path = self.output_dir / filename
-        if file_path.exists() and file_path.is_file():
-            self.send_response(200)
-            self.send_header("Content-Type", "audio/wav")
-            self.send_header("Accept-Ranges", "bytes")
-            file_size = file_path.stat().st_size
-            self.send_header("Content-Length", str(file_path.stat().st_size))
-            self.end_headers()
-            with open(file_path, "rb") as f:
-                self.wfile.write(f.read())
-        else:
+        """Serve audio files from the output directory with RFC 7233 HTTP 206 Byte-Range support."""
+        safe_name = Path(filename).name
+        file_path = self.output_dir / safe_name
+        if not (file_path.exists() and file_path.is_file()):
             self._send_json_response({"error": "Audio file not found"}, status=404)
+            return
+
+        file_size = file_path.stat().st_size
+        range_header = self.headers.get("Range")
+        if range_header and range_header.strip().lower().startswith("bytes="):
+            try:
+                range_spec = range_header.strip()[6:].split(",")[0].strip()
+                start_str, end_str = range_spec.split("-", 1)
+                if start_str == "":
+                    suffix_len = int(end_str)
+                    start = max(0, file_size - suffix_len)
+                    end = file_size - 1
+                else:
+                    start = int(start_str)
+                    end = int(end_str) if end_str else (file_size - 1)
+                start = max(0, min(start, file_size - 1))
+                end = max(start, min(end, file_size - 1))
+                chunk_len = end - start + 1
+
+                self.send_response(206)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+                self.send_header("Content-Length", str(chunk_len))
+                self.end_headers()
+                with open(file_path, "rb") as f:
+                    f.seek(start)
+                    self.wfile.write(f.read(chunk_len))
+                return
+            except Exception:
+                pass
+
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(file_size))
+        self.end_headers()
+        with open(file_path, "rb") as f:
+            self.wfile.write(f.read())
 
     def _handle_analyze(self) -> None:
         """Handle POST /api/analyze - analyze uploaded audio file."""
@@ -205,6 +238,23 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
             strategy = "optimized"
             transition_duration = 8.0
             user_specified_duration = False
+            crossfade_curve = "equal_power"
+            feature_flags: dict[str, bool] = {}
+
+            def _decode_str(raw: Any) -> str:
+                return (
+                    raw.decode("utf-8", errors="ignore").strip()
+                    if isinstance(raw, bytes)
+                    else str(raw).strip()
+                )
+
+            def _decode_bool(raw: Any, default: bool = True) -> bool:
+                val = _decode_str(raw).lower()
+                if val in ("true", "1", "yes", "on"):
+                    return True
+                if val in ("false", "0", "no", "off"):
+                    return False
+                return default
 
             for part in parts:
                 name = part.get("name", "")
@@ -213,24 +263,22 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                 elif name == "song_b":
                     song_b_data = part.get("data")
                 elif name == "strategy":
-                    raw_val = part.get("data", "")
-                    strategy = (
-                        raw_val.decode("utf-8", errors="ignore").strip()
-                        if isinstance(raw_val, bytes)
-                        else str(raw_val).strip()
-                    )
+                    strategy = _decode_str(part.get("data", ""))
+                    if strategy == "stem-level":
+                        strategy = "stem_level"
                 elif name == "transition_duration":
-                    raw_val = part.get("data", "8.0")
-                    dur_str = (
-                        raw_val.decode("utf-8", errors="ignore").strip()
-                        if isinstance(raw_val, bytes)
-                        else str(raw_val).strip()
-                    )
+                    dur_str = _decode_str(part.get("data", "8.0"))
                     try:
                         transition_duration = float(dur_str)
                         user_specified_duration = True
                     except (ValueError, TypeError):
                         transition_duration = 8.0
+                elif name == "crossfade_curve":
+                    c_val = _decode_str(part.get("data", "equal_power")).lower()
+                    if c_val in ("equal_power", "s_curve", "linear"):
+                        crossfade_curve = c_val
+                elif name and name.startswith(("dcp_", "automix_")):
+                    feature_flags[name] = _decode_bool(part.get("data", "true"))
 
             if strategy == "studio_remix":
                 # Studio Remix computes exact bar-aligned duration autonomously from musical analysis
@@ -278,15 +326,42 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                 analysis_a = analyze_track_with_backend(song_a, self.config.analysis, backend="auto")
                 analysis_b = analyze_track_with_backend(song_b, self.config.analysis, backend="auto")
 
-                # If Studio Remix strategy is chosen, decompose into 4 stems via 3-tier hierarchy
+                # Build modular DCP feature config & Automix config from request toggles
+                dcp_feat_cfg = replace(
+                    self.config.dcp_features,
+                    enable_zdf_sweeps=feature_flags.get("dcp_zdf_sweeps", True),
+                    enable_fdn_freeze=feature_flags.get("dcp_fdn_freeze", True),
+                    enable_sidechain_duck=feature_flags.get("dcp_sidechain_duck", True),
+                    enable_generative_assets=feature_flags.get("dcp_generative_assets", True),
+                    enable_vocal_chops=feature_flags.get("dcp_vocal_chops", True),
+                    enable_drum_regroove=feature_flags.get("dcp_drum_regroove", True),
+                    enable_master_glue=feature_flags.get("dcp_master_glue", True),
+                )
+                automix_cfg = replace(
+                    self.config.automix,
+                    beat_align=feature_flags.get("automix_beat_align", True),
+                    downbeat_phase_lock=feature_flags.get("automix_phase_lock", True),
+                    tempo_sync=feature_flags.get("automix_tempo_sync", True),
+                    bass_swap=feature_flags.get("automix_bass_swap", True),
+                    loudness_match=feature_flags.get("automix_loudness_match", True),
+                )
+                request_config = replace(
+                    self.config,
+                    dcp_features=dcp_feat_cfg,
+                    automix=automix_cfg,
+                    crossfade=replace(self.config.crossfade, curve=crossfade_curve),
+                )
+
+                # If a stem-based DCP strategy is chosen, decompose into 4 stems via 3-tier hierarchy
                 stems_a = None
                 stems_b = None
-                if strategy == "studio_remix":
+                dcp_strategy = "studio_remix" if strategy == "automix" else strategy
+                if dcp_strategy in ("studio_remix", "stem_level", "atmospheric", "optimized"):
                     from .stems import separate_hierarchical
                     stems_a, backend_a = separate_hierarchical(song_a, label="A")
                     stems_b, backend_b = separate_hierarchical(song_b, label="B")
 
-                # Build transition context
+                # Build transition context for DCP
                 context = TransitionContext(
                     song_a=song_a,
                     song_b=song_b,
@@ -295,65 +370,121 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                     analysis_a=analysis_a,
                     analysis_b=analysis_b,
                     requested_duration_s=transition_duration,
-                    requested_strategy=strategy,
-                    config=self.config,
+                    requested_strategy=dcp_strategy,
+                    config=request_config,
                 )
 
-                # Build planner and create plan
+                # Build planner and create DCP plan
                 registry = build_core_registry()
-                if strategy in registry:
-                    strategy_obj = registry.get(strategy)
+                if dcp_strategy in registry:
+                    strategy_obj = registry.get(dcp_strategy)
                 elif "optimized" in registry:
                     strategy_obj = registry.get("optimized")
                 else:
                     strategy_obj = list(registry.items())[0][1]
                 plan = strategy_obj.plan(context)
 
-                # Render both mix and baseline
-                mix_result = render_plan(song_a, song_b, plan, stems_a=stems_a, stems_b=stems_b, config=self.config)
-                baseline_overlap = plan.duration_s if plan.duration_s > 0.0 else max(0.1, transition_duration)
-                baseline_result = render_crossfade(song_a, song_b, overlap_s=baseline_overlap, config=self.config)
+                # 1. Render DCP transition
+                dcp_result = render_plan(
+                    song_a, song_b, plan, stems_a=stems_a, stems_b=stems_b, config=request_config
+                )
 
-                # Save outputs
+                # 2. Render dedicated Apple Music-style Automix transition
+                automix_target_dur = (
+                    transition_duration
+                    if user_specified_duration
+                    else min(8.0, min(song_a.duration_s, song_b.duration_s) * 0.5)
+                )
+                automix_result = render_automix(
+                    song_a,
+                    song_b,
+                    duration_s=max(0.5, automix_target_dur),
+                    config=request_config,
+                    automix_config=automix_cfg,
+                    analysis_a=analysis_a,
+                    analysis_b=analysis_b,
+                )
+
+                # 3. Render standalone Crossfade baseline
+                baseline_overlap = (
+                    plan.duration_s
+                    if (plan.duration_s > 0.0 and strategy != "automix")
+                    else max(0.1, min(automix_result.plan.duration_s, song_a.duration_s, song_b.duration_s))
+                )
+                baseline_overlap = min(baseline_overlap, song_a.duration_s, song_b.duration_s)
+                baseline_result = render_crossfade(
+                    song_a,
+                    song_b,
+                    overlap_s=baseline_overlap,
+                    curve=crossfade_curve,
+                    config=request_config,
+                )
+
+                # Save outputs for all three distinct engines
                 import uuid
                 mix_id = str(uuid.uuid4())[:8]
-                mix_filename = f"mix_{mix_id}.wav"
-                baseline_filename = f"baseline_{mix_id}.wav"
 
                 self.output_dir.mkdir(parents=True, exist_ok=True)
-                mix_path = self.output_dir / f"mix_{mix_id}.wav"
+                dcp_path = self.output_dir / f"mix_{mix_id}.wav"
+                automix_path = self.output_dir / f"automix_{mix_id}.wav"
                 baseline_path = self.output_dir / f"baseline_{mix_id}.wav"
 
-                save_audio(mix_path, mix_result.audio, subtype="PCM_24")
+                save_audio(dcp_path, dcp_result.audio, subtype="PCM_24")
+                save_audio(automix_path, automix_result.audio, subtype="PCM_24")
                 save_audio(baseline_path, baseline_result.audio, subtype="PCM_24")
 
                 # Generate waveforms for visualization
                 waveform_a = self._generate_waveform_envelope(song_a)
                 waveform_b = self._generate_waveform_envelope(song_b)
 
+                active_audio = automix_result.audio if strategy == "automix" else dcp_result.audio
                 from .rendering.telemetry import evaluate_bridge_telemetry
-                telemetry_report = evaluate_bridge_telemetry(mix_result.audio.samples, sr=mix_result.audio.sample_rate)
+                telemetry_report = evaluate_bridge_telemetry(
+                    active_audio.samples, sr=active_audio.sample_rate
+                )
 
                 plan_dict = plan.to_dict() if hasattr(plan, "to_dict") else {}
                 t_impact_val = float(plan.metadata.get("t_impact_s", 0.0) or 0.0)
                 t_breath_val = float(plan.metadata.get("t_breath_s", 0.0) or 0.0)
+
+                primary_start_s = (
+                    automix_result.plan.start_time_a_s if strategy == "automix" else plan.start_time_s
+                )
+                primary_dur_s = (
+                    automix_result.plan.duration_s if strategy == "automix" else plan.duration_s
+                )
+
                 result = {
                     "mix_id": mix_id,
+                    "active_engine": "automix" if strategy == "automix" else ("crossfade" if strategy == "crossfade" else "dcp"),
                     "mix_url": f"/api/audio/mix_{mix_id}.wav",
+                    "dcp_url": f"/api/audio/mix_{mix_id}.wav",
+                    "automix_url": f"/api/audio/automix_{mix_id}.wav",
                     "baseline_url": f"/api/audio/baseline_{mix_id}.wav",
-                    "duration_s": mix_result.audio.duration_s,
+                    "duration_s": active_audio.duration_s,
+                    "dcp_duration_s": dcp_result.audio.duration_s,
+                    "automix_duration_s": automix_result.audio.duration_s,
+                    "baseline_duration_s": baseline_result.audio.duration_s,
                     "song_a_duration_s": song_a.duration_s,
                     "song_b_duration_s": song_b.duration_s,
-                    "transition_start_s": plan.start_time_s,
-                    "transition_duration_s": plan.duration_s,
+                    "transition_start_s": primary_start_s,
+                    "transition_duration_s": primary_dur_s,
                     "impact_timeline_s": plan.start_time_s + t_impact_val,
                     "breath_timeline_s": plan.start_time_s + t_breath_val,
                     "downbeat_a_s": float(plan.metadata.get("downbeat_a_s", 0.0) or 0.0),
                     "downbeat_b_s": float(plan.metadata.get("downbeat_b_s", 0.0) or 0.0),
                     "automations": plan_dict.get("automations", []),
+                    "reasoning": list(automix_result.plan.reasoning) if strategy == "automix" else list(plan.reasoning),
+                    "warnings": list(automix_result.plan.warnings) if strategy == "automix" else list(plan.warnings),
                     "waveform_a": waveform_a,
                     "waveform_b": waveform_b,
                     "metadata": plan.metadata,
+                    "automix_plan": automix_result.plan.to_dict(),
+                    "crossfade_info": {
+                        "overlap_s": round(baseline_overlap, 3),
+                        "curve": crossfade_curve,
+                        "notes": list(baseline_result.notes),
+                    },
                     "telemetry": telemetry_report.to_dict(),
                 }
                 self._send_json_response(result)
@@ -503,7 +634,7 @@ def create_server(
     def handler(*args, **kwargs):
         return DCPWebStudioHandler(*args, config=config, static_dir=static_dir, output_dir=output_dir, **kwargs)
 
-    server = HTTPServer((host, port), handler)
+    server = ThreadingHTTPServer((host, port), handler)
     return server
 
 

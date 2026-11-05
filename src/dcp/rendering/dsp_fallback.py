@@ -386,22 +386,29 @@ def time_stretch_phase_vocoder_numpy(
 
         mag = np.abs(Zxx)
         phase = np.angle(Zxx)
-        out_stft = np.empty((n_bins, len(time_steps)), dtype=np.complex128)
-        phase_acc = phase[:, 0].copy()
+        n_steps = len(time_steps)
+        if n_steps == 0:
+            out_channels.append(stereo[ch].copy())
+            continue
 
-        for i, step in enumerate(time_steps):
-            idx = int(np.floor(step))
-            frac = step - idx
-            idx_next = min(idx + 1, n_frames - 1)
+        idx = np.floor(time_steps).astype(np.int64)
+        frac = (time_steps - idx)[np.newaxis, :]
+        idx_next = np.minimum(idx + 1, n_frames - 1)
 
-            # Linearly interpolate magnitude
-            m_interp = (1.0 - frac) * mag[:, idx] + frac * mag[:, idx_next]
+        # Vectorized linear magnitude interpolation across all frames
+        m_interp = (1.0 - frac) * mag[:, idx] + frac * mag[:, idx_next]
 
-            # Phase advance with principal determination wrapping in [-pi, pi]
-            dphi = phase[:, idx_next] - phase[:, idx] - omega
-            dphi = dphi - 2.0 * np.pi * np.round(dphi / (2.0 * np.pi))
-            out_stft[:, i] = m_interp * np.exp(1j * phase_acc)
-            phase_acc += omega + dphi
+        # Vectorized phase advance with principal determination wrapping in [-pi, pi]
+        dphi = phase[:, idx_next] - phase[:, idx] - omega[:, np.newaxis]
+        dphi = dphi - 2.0 * np.pi * np.round(dphi / (2.0 * np.pi))
+        phase_advance = omega[:, np.newaxis] + dphi
+
+        cum_phase = np.empty((n_bins, n_steps), dtype=np.float64)
+        cum_phase[:, 0] = phase[:, 0]
+        if n_steps > 1:
+            cum_phase[:, 1:] = phase[:, 0:1] + np.cumsum(phase_advance[:, :-1], axis=1)
+
+        out_stft = m_interp * np.exp(1j * cum_phase)
 
         _, y_rec = signal.istft(
             out_stft,

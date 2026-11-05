@@ -33,6 +33,41 @@ from .vocal_chop import generate_vocal_chops
 from .drum_regroove import regroove_drums_half_time
 
 
+def _blend_effect_edges(
+    dry_segment: np.ndarray,
+    wet_segment: np.ndarray,
+    sr: int,
+    *,
+    at_start: bool,
+    at_end: bool,
+    crossfade_ms: float = 6.0,
+) -> np.ndarray:
+    """Apply a short raised-cosine edge ramp when an effect starts/ends mid-buffer.
+
+    Eliminates step discontinuities (audible clicks) when filters, sidechains,
+    or delays switch on/off inside an active stem.
+    """
+    if crossfade_ms <= 0.0:
+        return wet_segment
+    seg_len = wet_segment.shape[-1]
+    ramp_len = min(int(round((crossfade_ms * 0.001) * sr)), seg_len // 3)
+    if ramp_len < 4:
+        return wet_segment
+
+    blended = wet_segment.copy()
+    if at_start:
+        w = 0.5 * (1.0 - np.cos(np.pi * np.arange(ramp_len, dtype=blended.dtype) / ramp_len))
+        blended[..., :ramp_len] = (
+            dry_segment[..., :ramp_len] * (1.0 - w) + wet_segment[..., :ramp_len] * w
+        )
+    if at_end:
+        w = 0.5 * (1.0 + np.cos(np.pi * np.arange(ramp_len, dtype=blended.dtype) / ramp_len))
+        blended[..., -ramp_len:] = (
+            wet_segment[..., -ramp_len:] * w + dry_segment[..., -ramp_len:] * (1.0 - w)
+        )
+    return blended
+
+
 def apply_effect_spec_to_stem(
     stem_audio: np.ndarray,
     effect: Any,
@@ -41,6 +76,7 @@ def apply_effect_spec_to_stem(
     sidechain_key_audio: np.ndarray | None = None,
     transition_start_s: float = 0.0,
     transition_duration_s: float | None = None,
+    edge_crossfade_ms: float = 6.0,
 ) -> np.ndarray:
     """
     Slices [start_sample : end_sample] from `stem_audio` and executes the EffectSpec.
@@ -57,6 +93,9 @@ def apply_effect_spec_to_stem(
 
     out = stem_audio.copy()
     segment = out[..., s_idx:e_idx]
+    dry_reference = segment.copy()
+    at_start = s_idx > 0
+    at_end = e_idx < n_total
     kind = getattr(effect, "kind", getattr(effect, "effect_type", "")).lower()
     params = getattr(effect, "params", {}) or {}
 
@@ -79,8 +118,11 @@ def apply_effect_spec_to_stem(
         f_end = float(getattr(effect, "end_hz", params.get("end_hz", 800.0)))
         q_val = float(params.get("resonance", params.get("resonance_q", 1.0)))
 
-        out[..., s_idx:e_idx] = process_zdf_svf_sweep_numpy(
+        wet_seg = process_zdf_svf_sweep_numpy(
             segment, sr=sr, start_cutoff_hz=f_start, end_cutoff_hz=f_end, resonance_q=q_val, mode=mode
+        )
+        out[..., s_idx:e_idx] = _blend_effect_edges(
+            dry_reference, wet_seg, sr, at_start=at_start, at_end=at_end, crossfade_ms=edge_crossfade_ms
         )
 
     elif kind in ("reverb_freeze", "fdn_freeze", "spatial_freeze"):
@@ -122,7 +164,7 @@ def apply_effect_spec_to_stem(
                 pad_len = segment.shape[-1] - key_seg.shape[-1]
                 key_seg = np.pad(key_seg, ((0, 0), (0, pad_len)) if key_seg.ndim == 2 else (0, pad_len))
 
-            out[..., s_idx:e_idx] = process_sidechain_compressor_numpy(
+            wet_seg = process_sidechain_compressor_numpy(
                 segment,
                 key_seg,
                 sr=sr,
@@ -131,6 +173,9 @@ def apply_effect_spec_to_stem(
                 release_beat_fraction=float(params.get("release_beats", params.get("release_beat_fraction", 0.25))),
                 threshold_db=float(params.get("threshold_db", -18.0)),
                 ratio=float(params.get("ratio", 4.0)),
+            )
+            out[..., s_idx:e_idx] = _blend_effect_edges(
+                dry_reference, wet_seg, sr, at_start=at_start, at_end=at_end, crossfade_ms=edge_crossfade_ms
             )
 
     elif kind == "stereo_width":
@@ -141,8 +186,10 @@ def apply_effect_spec_to_stem(
             w_traj = np.linspace(w_start, w_end, seg_len, dtype=np.float32)
             mid = 0.5 * (segment[0] + segment[1])
             side = 0.5 * (segment[0] - segment[1])
-            out[0, s_idx:e_idx] = mid + side * w_traj
-            out[1, s_idx:e_idx] = mid - side * w_traj
+            wet_seg = np.vstack([mid + side * w_traj, mid - side * w_traj])
+            out[:, s_idx:e_idx] = _blend_effect_edges(
+                dry_reference, wet_seg, sr, at_start=at_start, at_end=at_end, crossfade_ms=edge_crossfade_ms
+            )
 
     elif kind == "dub_delay_send":
         delay_beats = float(params.get("delay_note", 0.75))
@@ -150,16 +197,23 @@ def apply_effect_spec_to_stem(
         send_lvl = float(np.power(10.0, float(params.get("send_level", -6.0)) / 20.0))
         delay_sec = delay_beats * (60.0 / max(40.0, bpm))
         delay_samples = int(round(delay_sec * sr))
-        if delay_samples > 0 and delay_samples < segment.shape[-1]:
-            delayed = np.zeros_like(segment)
-            seg_len = segment.shape[-1]
-            for ch in range(segment.shape[0]):
-                in_ch = segment[ch] * send_lvl
-                out_ch = np.zeros(seg_len, dtype=np.float32)
-                for i in range(delay_samples, seg_len):
-                    out_ch[i] = in_ch[i - delay_samples] + feedback * out_ch[i - delay_samples]
-                delayed[ch] = out_ch
-            out[..., s_idx:e_idx] = np.clip(segment + delayed, -2.0, 2.0)
+        seg_len = segment.shape[-1]
+        if 0 < delay_samples < seg_len:
+            in_scaled = (segment * send_lvl).astype(np.float32)
+            delayed = np.zeros_like(in_scaled)
+            # Chunk-vectorized comb delay: each block of length `delay_samples` depends
+            # strictly on the previous block, eliminating the slow per-sample Python loop.
+            for pos in range(delay_samples, seg_len, delay_samples):
+                chunk_end = min(pos + delay_samples, seg_len)
+                chunk_len = chunk_end - pos
+                delayed[..., pos:chunk_end] = (
+                    in_scaled[..., pos - delay_samples : pos - delay_samples + chunk_len]
+                    + feedback * delayed[..., pos - delay_samples : pos - delay_samples + chunk_len]
+                )
+            wet_seg = np.clip(segment + delayed, -2.0, 2.0)
+            out[..., s_idx:e_idx] = _blend_effect_edges(
+                dry_reference, wet_seg, sr, at_start=at_start, at_end=at_end, crossfade_ms=edge_crossfade_ms
+            )
 
     return out
 
@@ -266,6 +320,30 @@ def render_plan(
     # List to collect wet freeze ghost tails for post-glue re-addition
     ghost_tails: list[tuple[np.ndarray, int, int]] = []
 
+    # Resolve modular DCP feature configuration (config + optional plan metadata overrides)
+    dcp_feat = cfg.dcp_features
+    meta_feat = plan.metadata.get("dcp_features") if isinstance(plan.metadata.get("dcp_features"), dict) else {}
+
+    def _feat_bool(attr: str) -> bool:
+        if attr in meta_feat:
+            return bool(meta_feat[attr])
+        return bool(getattr(dcp_feat, attr, True))
+
+    def _feat_float(attr: str, default: float) -> float:
+        if attr in meta_feat and meta_feat[attr] is not None:
+            return float(meta_feat[attr])
+        return float(getattr(dcp_feat, attr, default))
+
+    enable_zdf_sweeps = _feat_bool("enable_zdf_sweeps")
+    enable_fdn_freeze = _feat_bool("enable_fdn_freeze")
+    enable_sidechain_duck = _feat_bool("enable_sidechain_duck")
+    enable_generative_assets = _feat_bool("enable_generative_assets")
+    enable_vocal_chops = _feat_bool("enable_vocal_chops")
+    enable_drum_regroove = _feat_bool("enable_drum_regroove")
+    enable_master_glue = _feat_bool("enable_master_glue")
+    enable_tempo_lock = _feat_bool("enable_tempo_lock")
+    edge_xfade_ms = _feat_float("effect_edge_crossfade_ms", 6.0)
+
     def resolve(source: str, stem: str) -> AudioBuffer:
         key = (source, stem)
         if key not in cache:
@@ -328,7 +406,7 @@ def render_plan(
                 )
             audio_to_process = audio.samples[:, cue_start_frames:]
             warp_ratio_b = float(plan.metadata.get("warp_ratio_b", 1.0) or 1.0)
-            if abs(warp_ratio_b - 1.0) > 0.005:
+            if enable_tempo_lock and abs(warp_ratio_b - 1.0) > 0.005:
                 audio_to_process = time_stretch_phase_vocoder_numpy(audio_to_process, warp_ratio_b)
 
         offset_frames = int(round(offset_s * sample_rate))
@@ -336,7 +414,9 @@ def render_plan(
 
         # Resolve sidechain key audio (Song B drums or mix) if needed
         key_audio_samples = None
-        has_duck = any(getattr(e, "kind", "").lower() == "sidechain_duck" for e in automation.effects)
+        has_duck = enable_sidechain_duck and any(
+            getattr(e, "kind", "").lower() == "sidechain_duck" for e in automation.effects
+        )
         if has_duck and automation.source == "a":
             try:
                 b_stems = sources["b"][1]
@@ -358,9 +438,16 @@ def render_plan(
         bpm_val = float(plan.metadata.get("tempo_b", plan.metadata.get("tempo_a", 126.0)) or 126.0)
 
         # Check if stem contains an FDN spatial freeze effect
-        freeze_eff = next((e for e in automation.effects if getattr(e, "kind", "").lower() in ("spatial_freeze", "fdn_freeze", "reverb_freeze")), None)
+        freeze_eff = next(
+            (
+                e
+                for e in automation.effects
+                if getattr(e, "kind", "").lower() in ("spatial_freeze", "fdn_freeze", "reverb_freeze")
+            ),
+            None,
+        )
         wet_ghost_tail = None
-        if freeze_eff is not None:
+        if freeze_eff is not None and enable_fdn_freeze:
             # Generate pure wet freeze reverberant ghost tail (dry=0.0)
             p_dict = dict(getattr(freeze_eff, "params", {}) or {})
             p_dict["dry"] = 0.0
@@ -380,18 +467,22 @@ def render_plan(
                 sidechain_key_audio=key_audio_samples,
                 transition_start_s=transition_start_in_audio_s,
                 transition_duration_s=plan.duration_s,
+                edge_crossfade_ms=edge_xfade_ms,
             )
             if wet_ghost_tail is not None:
                 available = min(audio_to_process.shape[1], total_frames - offset_frames)
                 ghost_tails.append((wet_ghost_tail, offset_frames, available))
             # Exclude the freeze effect from the dry stem so the dry path receives gain automation
             effs_to_run = [e for e in automation.effects if e != freeze_eff]
+        elif freeze_eff is not None:
+            effs_to_run = [e for e in automation.effects if e != freeze_eff]
         else:
             effs_to_run = list(automation.effects)
 
         processed = audio_to_process
         for effect in effs_to_run:
-            if effect.kind == "lowpass_sweep":
+            ekind = getattr(effect, "kind", "").lower()
+            if ekind == "lowpass_sweep":
                 processed = apply_lowpass_sweep(
                     AudioBuffer(processed, audio.sample_rate),
                     effect,
@@ -400,6 +491,12 @@ def render_plan(
                     chunk_samples=cfg.render.effect_chunk_samples,
                 ).samples
             else:
+                if not enable_zdf_sweeps and any(
+                    tag in ekind for tag in ("zdf", "highpass", "lowpass", "bandpass", "hpf", "lpf", "bpf")
+                ):
+                    continue
+                if not enable_sidechain_duck and ekind == "sidechain_duck":
+                    continue
                 processed = apply_effect_spec_to_stem(
                     processed,
                     effect,
@@ -408,6 +505,7 @@ def render_plan(
                     sidechain_key_audio=key_audio_samples,
                     transition_start_s=transition_start_in_audio_s,
                     transition_duration_s=plan.duration_s,
+                    edge_crossfade_ms=edge_xfade_ms,
                 )
 
         # Time axis for gain interpolation should be relative to the sliced audio
@@ -440,86 +538,110 @@ def render_plan(
         t_breath_rel = float(plan.metadata.get("t_breath_s", max(0.0, t_impact_rel - 0.25)))
         impact_frame = int(round((plan.start_time_s + t_impact_rel) * sample_rate))
 
-        # 1. Reverse Crash Cymbal Swell into impact (BOOSTED)
-        try:
-            rev_crash = generate_reverse_crash(duration_s=min(1.5, t_impact_rel), sr=sample_rate, level_db=-6.0)
-            crash_len = rev_crash.shape[1]
-            crash_start = max(0, impact_frame - crash_len)
-            crash_avail = min(crash_len, total_frames - crash_start)
-            if crash_avail > 0:
-                output[:, crash_start : crash_start + crash_avail] += rev_crash[:, :crash_avail]
-        except Exception:
-            pass
+        if enable_generative_assets:
+            # 1. Reverse Crash Cymbal Swell into impact
+            try:
+                crash_db = _feat_float("crash_level_db", -6.0)
+                rev_crash = generate_reverse_crash(
+                    duration_s=min(1.5, t_impact_rel), sr=sample_rate, level_db=crash_db
+                )
+                crash_len = rev_crash.shape[1]
+                crash_start = max(0, impact_frame - crash_len)
+                crash_avail = min(crash_len, total_frames - crash_start)
+                if crash_avail > 0:
+                    output[:, crash_start : crash_start + crash_avail] += rev_crash[:, :crash_avail]
+            except Exception:
+                pass
 
-        # 2. Sub-Bass 808 Slam at impact downbeat (BOOSTED)
-        try:
-            root_pc = int(plan.metadata.get("bass_root_b", 2))
-            sub_808 = generate_sub_bass_808(duration_s=1.8, sr=sample_rate, root_pitch_class=root_pc, level_db=-3.0)
-            sub_len = sub_808.shape[1]
-            sub_avail = min(sub_len, total_frames - impact_frame)
-            if sub_avail > 0 and impact_frame >= 0:
-                output[:, impact_frame : impact_frame + sub_avail] += sub_808[:, :sub_avail]
-        except Exception:
-            pass
+            # 2. Sub-Bass 808 Slam at impact downbeat
+            try:
+                root_pc = int(plan.metadata.get("bass_root_b", 2))
+                sub_db = _feat_float("sub_808_level_db", -3.0)
+                sub_808 = generate_sub_bass_808(
+                    duration_s=1.8, sr=sample_rate, root_pitch_class=root_pc, level_db=sub_db
+                )
+                sub_len = sub_808.shape[1]
+                sub_avail = min(sub_len, total_frames - impact_frame)
+                if sub_avail > 0 and impact_frame >= 0:
+                    output[:, impact_frame : impact_frame + sub_avail] += sub_808[:, :sub_avail]
+            except Exception:
+                pass
 
-        # 3. Noise Riser during build-up (BOOSTED)
-        try:
-            riser_dur = max(0.5, t_breath_rel - t_intro_rel)
-            riser = generate_noise_riser(duration_s=riser_dur, sr=sample_rate, level_db=-8.0, sidechain_bpm=bpm_val)
-            riser_start = int(round((plan.start_time_s + t_intro_rel) * sample_rate))
-            riser_avail = min(riser.shape[1], total_frames - riser_start)
-            if riser_avail > 0 and riser_start >= 0:
-                output[:, riser_start : riser_start + riser_avail] += riser[:, :riser_avail]
-        except Exception:
-            pass
+            # 3. Noise Riser during build-up
+            try:
+                riser_dur = max(0.5, t_breath_rel - t_intro_rel)
+                riser_db = _feat_float("riser_level_db", -8.0)
+                riser = generate_noise_riser(
+                    duration_s=riser_dur, sr=sample_rate, level_db=riser_db, sidechain_bpm=bpm_val
+                )
+                riser_start = int(round((plan.start_time_s + t_intro_rel) * sample_rate))
+                riser_avail = min(riser.shape[1], total_frames - riser_start)
+                if riser_avail > 0 and riser_start >= 0:
+                    output[:, riser_start : riser_start + riser_avail] += riser[:, :riser_avail]
+            except Exception:
+                pass
 
         # 4. Syncopated Vocal Chops from RESOLVING PHRASE ONLY (not full stem)
-        try:
-            a_stems = sources["a"][1]
-            if a_stems and "vocals" in a_stems:
-                raw_voc = a_stems["vocals"].samples
-                # Use only the vocal tail from launchpad phrase to end
-                # launchpad is at t_impact_rel in transition coords
-                launchpad_frame = int(round((plan.start_time_s + t_impact_rel) * sample_rate))
-                vocal_tail_start = max(0, launchpad_frame - int(0.5 * sample_rate))  # 0.5s before launchpad
-                vocal_tail = raw_voc[:, vocal_tail_start:]
-                res_dur = max(0.5, plan.duration_s - t_impact_rel)
-                chops = generate_vocal_chops(vocal_tail, sr=sample_rate, bpm=bpm_val, duration_s=res_dur, level_db=-6.0)
-                chops_avail = min(chops.shape[1], total_frames - impact_frame)
-                if chops_avail > 0 and impact_frame >= 0:
-                    output[:, impact_frame : impact_frame + chops_avail] += chops[:, :chops_avail]
-        except Exception:
-            pass
+        if enable_vocal_chops:
+            try:
+                a_stems = sources["a"][1]
+                if a_stems and "vocals" in a_stems:
+                    raw_voc = a_stems["vocals"].samples
+                    launchpad_frame = int(round((plan.start_time_s + t_impact_rel) * sample_rate))
+                    vocal_tail_start = max(0, launchpad_frame - int(0.5 * sample_rate))
+                    vocal_tail = raw_voc[:, vocal_tail_start:]
+                    res_dur = max(0.5, plan.duration_s - t_impact_rel)
+                    chop_db = _feat_float("vocal_chop_level_db", -6.0)
+                    chops = generate_vocal_chops(
+                        vocal_tail, sr=sample_rate, bpm=bpm_val, duration_s=res_dur, level_db=chop_db
+                    )
+                    chops_avail = min(chops.shape[1], total_frames - impact_frame)
+                    if chops_avail > 0 and impact_frame >= 0:
+                        output[:, impact_frame : impact_frame + chops_avail] += chops[:, :chops_avail]
+            except Exception:
+                pass
 
-        # 5. Half-Time Drum Re-grooving pocket during post-impact bridge (BOOSTED + HPF)
-        try:
-            b_stems = sources["b"][1]
-            if b_stems and "drums" in b_stems:
-                raw_drums = b_stems["drums"].samples
-                pocket_dur = min(8.0, max(1.0, plan.duration_s - t_impact_rel))
-                regrooved = regroove_drums_half_time(raw_drums, sr=sample_rate, bpm=bpm_val, duration_s=pocket_dur)
-                # High-pass at 100Hz to avoid kick clash with main drums
-                from scipy import signal
-                sos_hp = signal.butter(2, min(100.0, sample_rate * 0.45) / (0.5 * sample_rate), btype="highpass", output="sos")
-                regrooved = signal.sosfilt(sos_hp, regrooved.astype(np.float64), axis=1).astype(np.float32)
-                pocket_avail = min(regrooved.shape[1], total_frames - impact_frame)
-                if pocket_avail > 0 and impact_frame >= 0:
-                    output[:, impact_frame : impact_frame + pocket_avail] += regrooved[:, :pocket_avail] * 1.0
-        except Exception:
-            pass
+        # 5. Half-Time Drum Re-grooving pocket during post-impact bridge
+        if enable_drum_regroove:
+            try:
+                b_stems = sources["b"][1]
+                if b_stems and "drums" in b_stems:
+                    raw_drums = b_stems["drums"].samples
+                    pocket_dur = min(8.0, max(1.0, plan.duration_s - t_impact_rel))
+                    regrooved = regroove_drums_half_time(
+                        raw_drums, sr=sample_rate, bpm=bpm_val, duration_s=pocket_dur
+                    )
+                    from scipy import signal
+                    sos_hp = signal.butter(
+                        2, min(100.0, sample_rate * 0.45) / (0.5 * sample_rate), btype="highpass", output="sos"
+                    )
+                    regrooved = signal.sosfilt(sos_hp, regrooved.astype(np.float64), axis=1).astype(np.float32)
+                    pocket_avail = min(regrooved.shape[1], total_frames - impact_frame)
+                    regroove_gain = _feat_float("regroove_gain", 1.0)
+                    if pocket_avail > 0 and impact_frame >= 0:
+                        output[:, impact_frame : impact_frame + pocket_avail] += (
+                            regrooved[:, :pocket_avail] * regroove_gain
+                        )
+            except Exception:
+                pass
 
         # 6. Apply Master Bus VCA Glue Compressor & Brickwall Limiter
-        try:
-            output = process_master_bus_glue_numpy(output, sr=sample_rate, threshold_db=-12.0, ratio=1.5, ceiling_dbfs=-0.5)
-        except Exception:
-            pass
+        if enable_master_glue:
+            try:
+                output = process_master_bus_glue_numpy(
+                    output, sr=sample_rate, threshold_db=-12.0, ratio=1.5, ceiling_dbfs=-0.5
+                )
+            except Exception:
+                pass
 
         # 7. Post-Glue Ghost Bus: re-add wet freeze tails so they survive limiting
-        for wet_tail, offset_f, avail in ghost_tails:
-            if avail > 0:
-                tail_avail = min(wet_tail.shape[1], avail)
-                if tail_avail > 0:
-                    output[:, offset_f : offset_f + tail_avail] += wet_tail[:, :tail_avail] * 0.7
+        if enable_fdn_freeze:
+            ghost_gain = _feat_float("ghost_tail_gain", 0.7)
+            for wet_tail, offset_f, avail in ghost_tails:
+                if avail > 0:
+                    tail_avail = min(wet_tail.shape[1], avail)
+                    if tail_avail > 0:
+                        output[:, offset_f : offset_f + tail_avail] += wet_tail[:, :tail_avail] * ghost_gain
 
     add_unique_note(
         notes,

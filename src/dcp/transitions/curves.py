@@ -42,6 +42,40 @@ def equal_power_fades(
     return fade_out, fade_in
 
 
+def crossfade_envelopes(
+    frame_count: int,
+    curve: str = "equal_power",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (fade_out, fade_in) amplitude envelopes for a crossfade overlap.
+
+    Supported curves:
+    - ``"equal_power"``: Constant-power cosine/sine fades (fade_out^2 + fade_in^2 = 1).
+    - ``"s_curve"``: Constant-power S-curve with zero derivative at both endpoints
+      (smoothstep phase warped into cosine/sine so fade entry/exit is C^1 smooth).
+    - ``"linear"``: Linear amplitude ramp (fade_out + fade_in = 1).
+    """
+
+    if frame_count < 1:
+        raise ValueError(f"frame_count must be at least 1, got {frame_count}")
+    normalized_curve = (curve or "equal_power").strip().lower()
+    positions = np.linspace(0.0, 1.0, frame_count, endpoint=True, dtype=np.float64)
+
+    if normalized_curve == "equal_power":
+        return equal_power_fades(frame_count)
+    if normalized_curve in ("s_curve", "smoothstep", "scurve"):
+        warped = smoothstep(positions)
+        fade_out = np.cos(warped * np.pi / 2.0)
+        fade_in = np.sin(warped * np.pi / 2.0)
+        return fade_out, fade_in
+    if normalized_curve == "linear":
+        fade_out = 1.0 - positions
+        fade_in = positions
+        return fade_out, fade_in
+    raise ValueError(
+        f"unsupported crossfade curve {curve!r}; expected 'equal_power', 's_curve', or 'linear'"
+    )
+
+
 def smoothstep(values: np.ndarray) -> np.ndarray:
     clipped = np.clip(values, 0.0, 1.0)
     return clipped * clipped * (3.0 - 2.0 * clipped)

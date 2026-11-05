@@ -84,15 +84,22 @@
             <section class="controls-section">
                 <div class="controls-grid">
                     <div class="control-group">
-                        <label for="strategy-select">Strategy</label>
+                        <label for="strategy-select">Transition Engine &amp; Strategy</label>
                         <select id="strategy-select">
-                            <option value="studio_remix">Studio Remix (Song C)</option>
-                            <option value="optimized">Optimized</option>
-                            <option value="rhythmic">Rhythmic</option>
-                            <option value="atmospheric">Atmospheric</option>
-                            <option value="stem-level">Stem Level</option>
-                            <option value="conservative">Conservative</option>
-                            <option value="crossfade">Crossfade</option>
+                            <optgroup label="DCP — Dynamic Canvas Processing">
+                                <option value="studio_remix">DCP: Studio Remix (Song C)</option>
+                                <option value="optimized">DCP: Optimized (RATO)</option>
+                                <option value="rhythmic">DCP: Rhythmic (Downbeat Lock)</option>
+                                <option value="atmospheric">DCP: Atmospheric (Filter Sweep)</option>
+                                <option value="stem_level">DCP: Stem Level</option>
+                                <option value="conservative">DCP: Conservative</option>
+                            </optgroup>
+                            <optgroup label="Automix — Continuous Flow">
+                                <option value="automix">Automix: Apple Music-Style Flow</option>
+                            </optgroup>
+                            <optgroup label="Crossfade — Volume Overlap">
+                                <option value="crossfade">Crossfade: Full-Mix Overlap</option>
+                            </optgroup>
                         </select>
                     </div>
 
@@ -109,6 +116,15 @@
                     </div>
 
                     <div class="control-group">
+                        <label for="crossfade-curve-select">Crossfade Curve</label>
+                        <select id="crossfade-curve-select">
+                            <option value="equal_power">Equal-Power (Cosine/Sine)</option>
+                            <option value="s_curve" selected>S-Curve (Smooth Entry/Exit)</option>
+                            <option value="linear">Linear Amplitude</option>
+                        </select>
+                    </div>
+
+                    <div class="control-group">
                         <button class="btn-primary btn-generate" id="generate-btn">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M12 2L2 7l10 5 10-5-10-5z"/>
@@ -117,6 +133,27 @@
                             </svg>
                             <span>Generate Transition</span>
                         </button>
+                    </div>
+                </div>
+
+                <!-- Modular Feature Toggles for DCP, Automix & Crossfade -->
+                <div class="modular-tuning-bar" id="modular-tuning-bar">
+                    <div class="tuning-group" id="tuning-group-dcp">
+                        <span class="tuning-group-title">DCP Modules:</span>
+                        <label class="chip-toggle"><input type="checkbox" id="dcp_zdf_sweeps" checked><span>ZDF Sweeps</span></label>
+                        <label class="chip-toggle"><input type="checkbox" id="dcp_fdn_freeze" checked><span>FDN Ghost Freeze</span></label>
+                        <label class="chip-toggle"><input type="checkbox" id="dcp_sidechain_duck" checked><span>Sidechain Duck</span></label>
+                        <label class="chip-toggle"><input type="checkbox" id="dcp_generative_assets" checked><span>Riser / 808 / Crash</span></label>
+                        <label class="chip-toggle"><input type="checkbox" id="dcp_vocal_chops" checked><span>Vocal Chops</span></label>
+                        <label class="chip-toggle"><input type="checkbox" id="dcp_drum_regroove" checked><span>Drum Re-Groove</span></label>
+                        <label class="chip-toggle"><input type="checkbox" id="dcp_master_glue" checked><span>Master Bus Glue</span></label>
+                    </div>
+                    <div class="tuning-group" id="tuning-group-automix">
+                        <span class="tuning-group-title">Automix Modules:</span>
+                        <label class="chip-toggle"><input type="checkbox" id="automix_phase_lock" checked><span>Downbeat Phase-Lock</span></label>
+                        <label class="chip-toggle"><input type="checkbox" id="automix_tempo_sync" checked><span>Tempo Sync (±8%)</span></label>
+                        <label class="chip-toggle"><input type="checkbox" id="automix_bass_swap" checked><span>Bass Swap (&lt;160Hz)</span></label>
+                        <label class="chip-toggle"><input type="checkbox" id="automix_loudness_match" checked><span>Loudness Match</span></label>
                     </div>
                 </div>
             </section>
@@ -154,7 +191,22 @@
                 </div>
 
                 <div class="comparison-controls">
-                    <label class="switch-label">
+                    <div class="engine-mode-bar">
+                        <span class="engine-mode-label">Live Seamless Listen (Click-Free Switch):</span>
+                        <div class="engine-mode-pills" role="tablist" aria-label="Playback Engine Mode">
+                            <button type="button" class="mode-pill active" id="mode-btn-mix" data-mode="mix">
+                                🎛️ DCP (Dynamic Canvas)
+                            </button>
+                            <button type="button" class="mode-pill" id="mode-btn-automix" data-mode="automix">
+                                🌊 Automix (Continuous Flow)
+                            </button>
+                            <button type="button" class="mode-pill" id="mode-btn-baseline" data-mode="baseline">
+                                🎚️ Crossfade (Volume Overlap)
+                            </button>
+                        </div>
+                        <span class="buffer-status-badge" id="buffer-status-badge">Ready</span>
+                    </div>
+                    <label class="switch-label" style="display: none;">
                         <input type="checkbox" id="compare-toggle" checked>
                         <span class="switch-slider"></span>
                         <span>Compare: DCP Mix vs Crossfade</span>
