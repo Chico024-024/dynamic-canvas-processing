@@ -237,20 +237,22 @@ def _cmd_render(args: argparse.Namespace) -> int:
     stems_b = load_stem_set(args.stems_b) if args.stems_b else None
 
     if getattr(args, "separate", False):
-        from .stems import get_demucs_separator
+        from .stems import separate_hierarchical
 
-        sep = get_demucs_separator()
         if stems_a is None:
-            print("Separating Song A stems using Demucs...")
-            stems_a = sep.separate(song_a)
+            print("Separating Song A stems (3-tier pipeline)...")
+            stems_a, be_a = separate_hierarchical(song_a, label="A")
+            print(f"  Song A separated using {be_a.upper()}")
         if stems_b is None:
-            print("Separating Song B stems using Demucs...")
-            stems_b = sep.separate(song_b)
+            print("Separating Song B stems (3-tier pipeline)...")
+            stems_b, be_b = separate_hierarchical(song_b, label="B")
+            print(f"  Song B separated using {be_b.upper()}")
     elif getattr(args, "strategy", None) == "studio_remix" and stems_a is None and stems_b is None:
-        from .stems.dsp_splitter import decompose_audio_to_stemset
-        print("Auto-decomposing tracks into 4-stem channels for Studio Remix...")
-        stems_a = decompose_audio_to_stemset(song_a, label="A")
-        stems_b = decompose_audio_to_stemset(song_b, label="B")
+        from .stems import separate_hierarchical
+        print("Auto-decomposing tracks into 4-stem channels for Studio Remix (3-tier pipeline)...")
+        stems_a, be_a = separate_hierarchical(song_a, label="A")
+        stems_b, be_b = separate_hierarchical(song_b, label="B")
+        print(f"  Separation complete using {be_a.upper()} / {be_b.upper()}")
 
     analysis_a = analyze_track_with_backend(
         song_a, config.analysis, backend=args.analyzer
@@ -465,12 +467,41 @@ def _cmd_demo(args: argparse.Namespace) -> int:
 
 
 def _cmd_separate(args: argparse.Namespace) -> int:
-    from .stems.demucs_adapter import DemucsAdapter, demucs_available
+    from .stems import (
+        DEFAULT_ROFORMER_MODEL,
+        DemucsAdapter,
+        RoformerAdapter,
+        demucs_available,
+        roformer_available,
+        separate_hierarchical,
+    )
+    from .stems.dsp_splitter import decompose_audio_to_stemset
 
-    if not demucs_available():
+    backend = getattr(args, "backend", "auto")
+    model = getattr(args, "model", None)
+
+    if backend == "roformer" and not roformer_available():
+        print(
+            "dcp: error: BS-RoFormer requires 'audio-separator' or 'onnxruntime'.\n"
+            "Install with: pip install audio-separator[cpu]\n"
+            "For GPU: pip install audio-separator[gpu]",
+            file=sys.stderr,
+        )
+        return 2
+
+    if backend == "demucs" and not demucs_available():
         print(
             "dcp: error: Demucs stem separation requires the 'demucs' and 'torch' packages.\n"
             "Install them with: pip install demucs torch",
+            file=sys.stderr,
+        )
+        return 2
+
+    if backend == "auto" and not roformer_available() and not demucs_available():
+        print(
+            "dcp: error: Demucs stem separation requires the 'demucs' and 'torch' packages.\n"
+            "Install them with: pip install demucs torch\n"
+            "(Or install audio-separator for BS-RoFormer, or pass --backend dsp for built-in DSP filterbank)",
             file=sys.stderr,
         )
         return 2
@@ -484,9 +515,23 @@ def _cmd_separate(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     audio = load_audio(str(input_path))
-    adapter = DemucsAdapter(model_name=args.model)
-    print(f"Separating stems for {input_path} using Demucs ({args.model})...")
-    stems = adapter.separate(audio)
+
+    if backend == "roformer":
+        adapter = RoformerAdapter(model_name=model or DEFAULT_ROFORMER_MODEL)
+        print(f"Separating stems for {input_path} using BS-RoFormer ({adapter._model_name})...")
+        stems = adapter.separate(audio)
+    elif backend == "demucs":
+        adapter = DemucsAdapter(model_name=model or "htdemucs")
+        print(f"Separating stems for {input_path} using Demucs ({adapter._model_name})...")
+        stems = adapter.separate(audio)
+    elif backend == "dsp":
+        print(f"Separating stems for {input_path} using Complementary DSP Filterbank...")
+        stems = decompose_audio_to_stemset(audio, label=input_path.stem)
+    else:  # auto (roformer or demucs available)
+        print(f"Separating stems for {input_path} (3-tier hierarchical pipeline)...")
+        stems, engine = separate_hierarchical(audio, label=input_path.stem)
+        print(f"  Separated using backend: {engine.upper()}")
+
     saved = save_stem_set(out_dir, stems)
     print(f"Saved {len(saved)} stems to {out_dir}:")
     for name, path in sorted(saved.items()):
@@ -579,10 +624,12 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     print(f"  pytest     {_version_of('pytest')}")
     print("")
     print("Optional components (not required by Core):")
-    print(f"  librosa    {_optional_module_status('librosa', 'librosa')}")
-    print(f"  demucs     {_optional_module_status('demucs')}")
-    print(f"  torch      {_optional_module_status('torch', 'torch')}")
-    print("Stem separation: not bundled; user-provided stems are supported.")
+    print(f"  librosa          {_optional_module_status('librosa', 'librosa')}")
+    print(f"  audio-separator  {_optional_module_status('audio_separator')}")
+    print(f"  onnxruntime      {_optional_module_status('onnxruntime')}")
+    print(f"  demucs           {_optional_module_status('demucs')}")
+    print(f"  torch            {_optional_module_status('torch', 'torch')}")
+    print("Stem separation: 3-tier hierarchy (Tier 1: BS-RoFormer, Tier 2: Demucs, Tier 3: Built-in DSP).")
     print("")
 
     registry, advanced = discover_advanced_strategies()
@@ -821,7 +868,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--out", required=True, help="output directory for stem WAV files"
     )
     separate.add_argument(
-        "--model", default="htdemucs", help="Demucs model name (default: htdemucs)"
+        "--backend",
+        choices=["auto", "roformer", "demucs", "dsp"],
+        default="auto",
+        help="separation backend: auto (best available), roformer (Tier 1), demucs (Tier 2), or dsp (Tier 3 fallback)",
+    )
+    separate.add_argument(
+        "--model", default=None, help="Model name or checkpoint (e.g. htdemucs or model_bs_roformer_ep_317_sdr_12.9755.ckpt)"
     )
     separate.set_defaults(func=_cmd_separate)
 

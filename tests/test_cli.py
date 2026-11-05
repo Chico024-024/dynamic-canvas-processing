@@ -357,8 +357,27 @@ def test_doctor_reports_environment(capsys):
     assert "DCP Core 0.1.0" in captured.out
     assert "Available strategies:" in captured.out
     assert "stem_level" in captured.out
-    assert "Stem separation: not bundled" in captured.out
+    assert "Stem separation: 3-tier hierarchy" in captured.out
     assert "Advanced plugin:" in captured.out
+
+
+def test_separate_command_dsp_backend(tmp_path, capsys):
+    paths = _synthesize(tmp_path, capsys)
+    out_stems = tmp_path / "separated_stems"
+    code = main([
+        "separate",
+        str(paths["a"]),
+        "--out",
+        str(out_stems),
+        "--backend",
+        "dsp",
+    ])
+    captured = capsys.readouterr()
+    assert code == 0, captured.err
+    assert (out_stems / "vocals.wav").exists()
+    assert (out_stems / "drums.wav").exists()
+    assert (out_stems / "bass.wav").exists()
+    assert (out_stems / "other.wav").exists()
 
 
 def test_help_and_missing_command(capsys):

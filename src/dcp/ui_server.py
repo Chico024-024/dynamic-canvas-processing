@@ -278,25 +278,13 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                 analysis_a = analyze_track_with_backend(song_a, self.config.analysis, backend="auto")
                 analysis_b = analyze_track_with_backend(song_b, self.config.analysis, backend="auto")
 
-                # If Studio Remix strategy is chosen, decompose into 4 stems on-the-fly
+                # If Studio Remix strategy is chosen, decompose into 4 stems via 3-tier hierarchy
                 stems_a = None
                 stems_b = None
                 if strategy == "studio_remix":
-                    from .stems.demucs_adapter import demucs_available, DemucsAdapter
-                    if demucs_available():
-                        try:
-                            separator = DemucsAdapter()
-                            stems_a = separator.separate(song_a)
-                            stems_b = separator.separate(song_b)
-                        except Exception as e:
-                            # Fallback if Demucs run fails
-                            from .stems.dsp_splitter import decompose_audio_to_stemset
-                            stems_a = decompose_audio_to_stemset(song_a, label="A")
-                            stems_b = decompose_audio_to_stemset(song_b, label="B")
-                    else:
-                        from .stems.dsp_splitter import decompose_audio_to_stemset
-                        stems_a = decompose_audio_to_stemset(song_a, label="A")
-                        stems_b = decompose_audio_to_stemset(song_b, label="B")
+                    from .stems import separate_hierarchical
+                    stems_a, backend_a = separate_hierarchical(song_a, label="A")
+                    stems_b, backend_b = separate_hierarchical(song_b, label="B")
 
                 # Build transition context
                 context = TransitionContext(
