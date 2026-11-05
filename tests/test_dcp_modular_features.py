@@ -1,4 +1,4 @@
-"""Tests for Automix, Enhanced Crossfade, Modular DCP Features, and UI Streaming."""
+"""Tests for DCP Modular Features, Effect Boundary Smoothing, and HTTP 206 Streaming."""
 
 from __future__ import annotations
 
@@ -7,22 +7,14 @@ import pytest
 
 from conftest import make_tone
 from dcp.analysis import analyze_track_with_backend
-from dcp.automix import (
-    AutomixPlan,
-    AutomixResult,
-    _detect_smart_boundaries,
-    plan_automix,
-    render_automix,
-)
-from dcp.config import AutomixConfig, CrossfadeConfig, DCPConfig, DCPFeatureConfig, DEFAULT_CONFIG
+from dcp.config import DCPConfig, DCPFeatureConfig, DEFAULT_CONFIG
 from dcp.models import AudioBuffer, StemSet
-from dcp.rendering.crossfade import render_crossfade
 from dcp.rendering.stem_mix import _blend_effect_edges, render_plan
 from dcp.transitions.curves import crossfade_envelopes
 
 
 # ---------------------------------------------------------------------------
-# Crossfade Envelopes & Enhanced Crossfade
+# Transition Envelopes (Internal Curves)
 # ---------------------------------------------------------------------------
 
 def test_crossfade_envelopes_equal_power_power_conservation():
@@ -50,104 +42,6 @@ def test_crossfade_envelopes_linear():
     fade_out, fade_in = crossfade_envelopes(500, curve="linear")
     amplitude_sum = fade_out + fade_in
     np.testing.assert_allclose(amplitude_sum, 1.0, atol=1e-5)
-
-
-def test_render_crossfade_with_different_curves():
-    sr = 22050
-    dur = 4.0
-    a = make_tone(frequency=440.0, duration_s=dur, sample_rate=sr)
-    b = make_tone(frequency=880.0, duration_s=dur, sample_rate=sr)
-
-    res_eq = render_crossfade(a, b, overlap_s=2.0, curve="equal_power")
-    res_sc = render_crossfade(a, b, overlap_s=2.0, curve="s_curve")
-    res_lin = render_crossfade(a, b, overlap_s=2.0, curve="linear")
-
-    assert res_eq.audio.sample_rate == sr
-    assert res_sc.audio.sample_rate == sr
-    assert res_lin.audio.sample_rate == sr
-    # Outputs should differ due to curve profiles
-    assert not np.allclose(res_eq.audio.samples, res_sc.audio.samples)
-    assert not np.allclose(res_eq.audio.samples, res_lin.audio.samples)
-
-
-# ---------------------------------------------------------------------------
-# Automix Planning & Rendering (Apple Music style)
-# ---------------------------------------------------------------------------
-
-def _make_rhythmic_audio(bpm: float, duration_s: float, sr: int = 22050) -> AudioBuffer:
-    """Create synthetic audio with periodic beat pulses for automix testing."""
-    total_samples = int(duration_s * sr)
-    beat_interval = int(round(60.0 / bpm * sr))
-    t = np.linspace(0, duration_s, total_samples, endpoint=False)
-    # Carrier synth
-    sig = 0.3 * np.sin(2 * np.pi * 220.0 * t)
-    # Add clicks on beats
-    for idx in range(0, total_samples, beat_interval):
-        end = min(total_samples, idx + 100)
-        sig[idx:end] += 0.5 * np.hanning(end - idx)
-    stereo = np.vstack([sig, sig]).astype(np.float32)
-    return AudioBuffer(stereo, sr)
-
-
-def test_detect_smart_boundaries():
-    sr = 22050
-    a = make_tone(duration_s=8.0, sample_rate=sr)
-    start_s, outro_s, end_s = _detect_smart_boundaries(a)
-    assert 0.0 <= start_s <= a.duration_s
-    assert start_s <= outro_s <= end_s
-    assert end_s <= a.duration_s
-
-
-def test_plan_automix_downbeat_phase_lock():
-    sr = 22050
-    a = _make_rhythmic_audio(120.0, 12.0, sr)
-    b = _make_rhythmic_audio(120.0, 12.0, sr)
-    analysis_a = analyze_track_with_backend(a, DEFAULT_CONFIG.analysis)
-    analysis_b = analyze_track_with_backend(b, DEFAULT_CONFIG.analysis)
-
-    plan = plan_automix(a, b, analysis_a=analysis_a, analysis_b=analysis_b, duration_s=4.0)
-    assert plan.beat_aligned is True
-    assert plan.phase_locked is True
-    assert plan.tempo_synced is True
-    assert plan.bars in (2, 4, 8)
-
-
-def test_render_automix_within_8_percent_tempo_sync():
-    sr = 22050
-    # 120 BPM vs 124 BPM (3.3% difference, well within +/-8% boundary)
-    a = _make_rhythmic_audio(120.0, 10.0, sr)
-    b = _make_rhythmic_audio(124.0, 10.0, sr)
-
-    res = render_automix(a, b, duration_s=4.0)
-    assert isinstance(res, AutomixResult)
-    assert res.plan.tempo_synced is True
-    assert res.audio.sample_rate == sr
-    assert res.audio.duration_s > a.duration_s  # Song B extends the track
-
-
-def test_render_automix_beyond_8_percent_filter_glide():
-    sr = 22050
-    # 100 BPM vs 130 BPM (30% difference, exceeds +/-8% threshold)
-    a = _make_rhythmic_audio(100.0, 10.0, sr)
-    b = _make_rhythmic_audio(130.0, 10.0, sr)
-
-    res = render_automix(a, b, duration_s=4.0)
-    assert isinstance(res, AutomixResult)
-    # Outside +/-8%, tempo_synced is False and filter-glide is applied
-    assert res.plan.tempo_synced is False
-    assert res.audio.sample_rate == sr
-
-
-def test_render_automix_bass_swap_crossover():
-    sr = 22050
-    a = make_tone(frequency=80.0, duration_s=8.0, sample_rate=sr)  # pure sub-bass
-    b = make_tone(frequency=80.0, duration_s=8.0, sample_rate=sr)  # pure sub-bass
-
-    cfg = AutomixConfig(bass_swap=True, bass_crossover_hz=160.0, loudness_match=False)
-    res = render_automix(a, b, automix_config=cfg, duration_s=4.0)
-    # Verify no clipping / low-end blowout occurred
-    max_peak = np.max(np.abs(res.audio.samples))
-    assert max_peak < 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -261,3 +155,4 @@ def test_ui_server_http_206_byte_range_streaming(tmp_path):
     finally:
         server.shutdown()
         thread.join(timeout=1.0)
+

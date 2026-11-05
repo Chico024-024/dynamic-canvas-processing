@@ -246,56 +246,6 @@ def _cmd_crossfade(args: argparse.Namespace) -> int:
     return 0 if report.passed else 1
 
 
-def _cmd_automix(args: argparse.Namespace) -> int:
-    from .automix import render_automix
-    from .config import AutomixConfig
-
-    config = _config_for_cli(args)
-    amx_cfg = AutomixConfig(
-        enabled=True,
-        default_duration_s=args.duration,
-        beat_align=not bool(getattr(args, "no_beat_align", False)),
-        downbeat_phase_lock=not bool(getattr(args, "no_phase_lock", False)),
-        tempo_sync=not bool(getattr(args, "no_tempo_sync", False)),
-        smart_transition_points=not bool(getattr(args, "no_smart_points", False)),
-        bass_swap=not bool(getattr(args, "no_bass_swap", False)),
-        loudness_match=not bool(getattr(args, "no_loudness_match", False)),
-        curve=getattr(args, "curve", "s_curve"),
-    )
-    song_a = load_audio(args.song_a)
-    song_b = load_audio(args.song_b)
-    result = render_automix(
-        song_a,
-        song_b,
-        duration_s=args.duration,
-        config=config,
-        automix_config=amx_cfg,
-    )
-    save_audio(
-        args.output,
-        result.audio,
-        subtype=config.render.wav_subtype,
-        allow_clipping=not config.render.prevent_clipping,
-    )
-    report = validate_audio(
-        result.audio,
-        expected_duration_s=result.audio.duration_s,
-        expected_sample_rate=song_a.sample_rate,
-        expected_channels=song_a.channels,
-    )
-    print(f"Wrote Automix transition: {args.output}")
-    print(
-        f"Duration: {result.audio.duration_s:.3f}s "
-        f"(overlap {result.plan.duration_s:.2f}s, {result.plan.bars} bar(s))"
-    )
-    for note in result.notes:
-        print(f"Note: {note}")
-    print(report.format_text())
-    if getattr(args, "plan_json", None):
-        path = _write_json(args.plan_json, result.plan.to_dict())
-        print(f"Automix Plan JSON: {path}")
-    return 0 if report.passed else 1
-
 
 def _cmd_render(args: argparse.Namespace) -> int:
     config = _config_for_cli(args)
@@ -802,32 +752,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="do not apply the automatic master gain that prevents clipping",
     )
     crossfade.set_defaults(func=_cmd_crossfade)
-
-    automix = subparsers.add_parser(
-        "automix",
-        help="render an Apple Music-style continuous Automix transition (beat/tempo/bass/loudness aligned)",
-    )
-    automix.add_argument("song_a", help="Song A audio file")
-    automix.add_argument("song_b", help="Song B audio file")
-    automix.add_argument("output", help="output WAV path")
-    automix.add_argument(
-        "--duration", type=float, default=8.0, help="target overlap duration in seconds"
-    )
-    automix.add_argument(
-        "--curve",
-        choices=("s_curve", "equal_power", "linear"),
-        default="s_curve",
-        help="mid/high blend envelope curve (default: s_curve)",
-    )
-    automix.add_argument("--no-beat-align", action="store_true", help="disable bar/beat quantization")
-    automix.add_argument("--no-phase-lock", action="store_true", help="disable downbeat-to-downbeat phase lock")
-    automix.add_argument("--no-tempo-sync", action="store_true", help="disable bounded ±8%% tempo stretching")
-    automix.add_argument("--no-smart-points", action="store_true", help="disable smart outro/intro boundary detection")
-    automix.add_argument("--no-bass-swap", action="store_true", help="disable low-end crossover swap")
-    automix.add_argument("--no-loudness-match", action="store_true", help="disable RMS/LUFS loudness matching")
-    automix.add_argument("--no-limit", action="store_true", help="disable automatic peak ceiling limiting")
-    automix.add_argument("--plan-json", help="write the Automix plan as JSON")
-    automix.set_defaults(func=_cmd_automix)
 
     render = subparsers.add_parser(
         "render", help="plan and render a DCP transition"

@@ -27,12 +27,11 @@ import numpy as np
 
 from dcp.audio_io import load_audio, save_audio
 from dcp.analysis import analyze_track_with_backend
-from dcp.automix import render_automix
-from dcp.config import AutomixConfig, CrossfadeConfig, DCPConfig, DCPFeatureConfig, DEFAULT_CONFIG
+from dcp.config import DCPConfig, DCPFeatureConfig, DEFAULT_CONFIG
 from dcp.models import AudioBuffer
 from dcp.transitions import TransitionContext
 from dcp.transitions.strategies import build_core_registry
-from dcp.rendering import render_plan, render_crossfade
+from dcp.rendering import render_plan
 from dcp.validation import validate_audio
 
 
@@ -326,7 +325,7 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                 analysis_a = analyze_track_with_backend(song_a, self.config.analysis, backend="auto")
                 analysis_b = analyze_track_with_backend(song_b, self.config.analysis, backend="auto")
 
-                # Build modular DCP feature config & Automix config from request toggles
+                # Build modular DCP feature config from request toggles
                 dcp_feat_cfg = replace(
                     self.config.dcp_features,
                     enable_zdf_sweeps=feature_flags.get("dcp_zdf_sweeps", True),
@@ -337,26 +336,15 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                     enable_drum_regroove=feature_flags.get("dcp_drum_regroove", True),
                     enable_master_glue=feature_flags.get("dcp_master_glue", True),
                 )
-                automix_cfg = replace(
-                    self.config.automix,
-                    beat_align=feature_flags.get("automix_beat_align", True),
-                    downbeat_phase_lock=feature_flags.get("automix_phase_lock", True),
-                    tempo_sync=feature_flags.get("automix_tempo_sync", True),
-                    bass_swap=feature_flags.get("automix_bass_swap", True),
-                    loudness_match=feature_flags.get("automix_loudness_match", True),
-                )
                 request_config = replace(
                     self.config,
                     dcp_features=dcp_feat_cfg,
-                    automix=automix_cfg,
-                    crossfade=replace(self.config.crossfade, curve=crossfade_curve),
                 )
 
                 # If a stem-based DCP strategy is chosen, decompose into 4 stems via 3-tier hierarchy
                 stems_a = None
                 stems_b = None
-                dcp_strategy = "studio_remix" if strategy == "automix" else strategy
-                if dcp_strategy in ("studio_remix", "stem_level", "atmospheric", "optimized"):
+                if strategy in ("studio_remix", "stem_level", "atmospheric", "optimized"):
                     from .stems import separate_hierarchical
                     stems_a, backend_a = separate_hierarchical(song_a, label="A")
                     stems_b, backend_b = separate_hierarchical(song_b, label="B")
@@ -370,121 +358,65 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                     analysis_a=analysis_a,
                     analysis_b=analysis_b,
                     requested_duration_s=transition_duration,
-                    requested_strategy=dcp_strategy,
+                    requested_strategy=strategy,
                     config=request_config,
                 )
 
                 # Build planner and create DCP plan
                 registry = build_core_registry()
-                if dcp_strategy in registry:
-                    strategy_obj = registry.get(dcp_strategy)
+                if strategy in registry:
+                    strategy_obj = registry.get(strategy)
                 elif "optimized" in registry:
                     strategy_obj = registry.get("optimized")
                 else:
                     strategy_obj = list(registry.items())[0][1]
                 plan = strategy_obj.plan(context)
 
-                # 1. Render DCP transition
+                # Render DCP transition
                 dcp_result = render_plan(
                     song_a, song_b, plan, stems_a=stems_a, stems_b=stems_b, config=request_config
                 )
 
-                # 2. Render dedicated Apple Music-style Automix transition
-                automix_target_dur = (
-                    transition_duration
-                    if user_specified_duration
-                    else min(8.0, min(song_a.duration_s, song_b.duration_s) * 0.5)
-                )
-                automix_result = render_automix(
-                    song_a,
-                    song_b,
-                    duration_s=max(0.5, automix_target_dur),
-                    config=request_config,
-                    automix_config=automix_cfg,
-                    analysis_a=analysis_a,
-                    analysis_b=analysis_b,
-                )
-
-                # 3. Render standalone Crossfade baseline
-                baseline_overlap = (
-                    plan.duration_s
-                    if (plan.duration_s > 0.0 and strategy != "automix")
-                    else max(0.1, min(automix_result.plan.duration_s, song_a.duration_s, song_b.duration_s))
-                )
-                baseline_overlap = min(baseline_overlap, song_a.duration_s, song_b.duration_s)
-                baseline_result = render_crossfade(
-                    song_a,
-                    song_b,
-                    overlap_s=baseline_overlap,
-                    curve=crossfade_curve,
-                    config=request_config,
-                )
-
-                # Save outputs for all three distinct engines
+                # Save output
                 import uuid
                 mix_id = str(uuid.uuid4())[:8]
 
                 self.output_dir.mkdir(parents=True, exist_ok=True)
                 dcp_path = self.output_dir / f"mix_{mix_id}.wav"
-                automix_path = self.output_dir / f"automix_{mix_id}.wav"
-                baseline_path = self.output_dir / f"baseline_{mix_id}.wav"
-
                 save_audio(dcp_path, dcp_result.audio, subtype="PCM_24")
-                save_audio(automix_path, automix_result.audio, subtype="PCM_24")
-                save_audio(baseline_path, baseline_result.audio, subtype="PCM_24")
 
                 # Generate waveforms for visualization
                 waveform_a = self._generate_waveform_envelope(song_a)
                 waveform_b = self._generate_waveform_envelope(song_b)
 
-                active_audio = automix_result.audio if strategy == "automix" else dcp_result.audio
                 from .rendering.telemetry import evaluate_bridge_telemetry
                 telemetry_report = evaluate_bridge_telemetry(
-                    active_audio.samples, sr=active_audio.sample_rate
+                    dcp_result.audio.samples, sr=dcp_result.audio.sample_rate
                 )
 
                 plan_dict = plan.to_dict() if hasattr(plan, "to_dict") else {}
                 t_impact_val = float(plan.metadata.get("t_impact_s", 0.0) or 0.0)
                 t_breath_val = float(plan.metadata.get("t_breath_s", 0.0) or 0.0)
 
-                primary_start_s = (
-                    automix_result.plan.start_time_a_s if strategy == "automix" else plan.start_time_s
-                )
-                primary_dur_s = (
-                    automix_result.plan.duration_s if strategy == "automix" else plan.duration_s
-                )
-
                 result = {
                     "mix_id": mix_id,
-                    "active_engine": "automix" if strategy == "automix" else ("crossfade" if strategy == "crossfade" else "dcp"),
                     "mix_url": f"/api/audio/mix_{mix_id}.wav",
-                    "dcp_url": f"/api/audio/mix_{mix_id}.wav",
-                    "automix_url": f"/api/audio/automix_{mix_id}.wav",
-                    "baseline_url": f"/api/audio/baseline_{mix_id}.wav",
-                    "duration_s": active_audio.duration_s,
-                    "dcp_duration_s": dcp_result.audio.duration_s,
-                    "automix_duration_s": automix_result.audio.duration_s,
-                    "baseline_duration_s": baseline_result.audio.duration_s,
+                    "baseline_url": None,
+                    "duration_s": dcp_result.audio.duration_s,
                     "song_a_duration_s": song_a.duration_s,
                     "song_b_duration_s": song_b.duration_s,
-                    "transition_start_s": primary_start_s,
-                    "transition_duration_s": primary_dur_s,
+                    "transition_start_s": plan.start_time_s,
+                    "transition_duration_s": plan.duration_s,
                     "impact_timeline_s": plan.start_time_s + t_impact_val,
                     "breath_timeline_s": plan.start_time_s + t_breath_val,
                     "downbeat_a_s": float(plan.metadata.get("downbeat_a_s", 0.0) or 0.0),
                     "downbeat_b_s": float(plan.metadata.get("downbeat_b_s", 0.0) or 0.0),
                     "automations": plan_dict.get("automations", []),
-                    "reasoning": list(automix_result.plan.reasoning) if strategy == "automix" else list(plan.reasoning),
-                    "warnings": list(automix_result.plan.warnings) if strategy == "automix" else list(plan.warnings),
+                    "reasoning": list(plan.reasoning),
+                    "warnings": list(plan.warnings),
                     "waveform_a": waveform_a,
                     "waveform_b": waveform_b,
                     "metadata": plan.metadata,
-                    "automix_plan": automix_result.plan.to_dict(),
-                    "crossfade_info": {
-                        "overlap_s": round(baseline_overlap, 3),
-                        "curve": crossfade_curve,
-                        "notes": list(baseline_result.notes),
-                    },
                     "telemetry": telemetry_report.to_dict(),
                 }
                 self._send_json_response(result)

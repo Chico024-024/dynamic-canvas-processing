@@ -79,24 +79,6 @@ class CrossfadeConfig:
 
 
 @dataclass(frozen=True)
-class AutomixConfig:
-    """Parameters for the Apple Music-style Automix engine."""
-
-    enabled: bool = True
-    default_duration_s: float = 8.0
-    beat_align: bool = True
-    downbeat_phase_lock: bool = True
-    tempo_sync: bool = True
-    max_tempo_stretch_pct: float = 0.08
-    smart_transition_points: bool = True
-    bass_swap: bool = True
-    bass_crossover_hz: float = 160.0
-    loudness_match: bool = True
-    max_loudness_trim_db: float = 4.5
-    curve: str = "s_curve"
-
-
-@dataclass(frozen=True)
 class DCPFeatureConfig:
     """Modular feature toggles and gain staging for DCP (Dynamic Canvas Processing)."""
 
@@ -127,7 +109,6 @@ class DCPConfig:
     render: RenderConfig = field(default_factory=RenderConfig)
     optimization: OptimizationConfig = field(default_factory=OptimizationConfig)
     crossfade: CrossfadeConfig = field(default_factory=CrossfadeConfig)
-    automix: AutomixConfig = field(default_factory=AutomixConfig)
     dcp_features: DCPFeatureConfig = field(default_factory=DCPFeatureConfig)
     validation_max_gap_s: float = 3.0
     validation_click_threshold: float = 1.5

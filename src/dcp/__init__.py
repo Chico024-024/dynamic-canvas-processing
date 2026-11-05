@@ -2,10 +2,8 @@
 
 __version__ = "0.1.0"
 
-from .automix import AutomixPlan, AutomixResult, plan_automix, render_automix
 from .audio_io import load_audio, save_audio
 from .config import (
-    AutomixConfig,
     CrossfadeConfig,
     DCPConfig,
     DCPFeatureConfig,
@@ -33,9 +31,6 @@ __all__ = [
     "AnalysisConfig",
     "AudioBuffer",
     "AudioFormatError",
-    "AutomixConfig",
-    "AutomixPlan",
-    "AutomixResult",
     "CrossfadeConfig",
     "DCPConfig",
     "DCPFeatureConfig",
@@ -53,8 +48,6 @@ __all__ = [
     "generate_synthetic_track",
     "load_audio",
     "optimize_transition",
-    "plan_automix",
-    "render_automix",
     "save_audio",
     "save_html_report",
 ]

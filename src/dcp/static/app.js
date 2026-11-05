@@ -12,13 +12,12 @@
             a: { file: null, analysis: null, waveform: [], element: null, objectUrl: null },
             b: { file: null, analysis: null, waveform: [], element: null, objectUrl: null }
         },
-        currentMode: 'mix', // 'mix' (DCP), 'automix' (Automix), or 'baseline' (Crossfade)
         isPlaying: false,
         currentTime: 0,
         duration: 0,
         audioContext: null,
         audioSource: null,
-        audioBuffers: { mix: null, automix: null, baseline: null },
+        audioBuffer: null,
         gainNode: null,
         animationFrame: null,
         canvas: null,
@@ -202,10 +201,6 @@
                     'dcp_vocal_chops',
                     'dcp_drum_regroove',
                     'dcp_master_glue',
-                    'automix_phase_lock',
-                    'automix_tempo_sync',
-                    'automix_bass_swap',
-                    'automix_loudness_match',
                 ];
                 toggleIds.forEach((id) => {
                     const el = document.getElementById(id);
@@ -228,27 +223,16 @@
                 const result = await response.json();
                 state.lastResult = result;
 
-                // Store the mix URLs and ID for playback/download
+                // Store the mix URL and ID for playback/download
                 state.currentMixId = result.mix_id;
-                state.mixUrl = result.mix_url || result.dcp_url;
-                state.automixUrl = result.automix_url || result.mix_url;
-                state.baselineUrl = result.baseline_url;
+                state.mixUrl = result.mix_url;
                 state.duration = result.duration_s || 0;
                 state.transitionStartS = result.transition_start_s || 0;
                 state.transitionDurationS = result.transition_duration_s || 8;
                 state.songADurationS = result.song_a_duration_s || 0;
                 state.songBDurationS = result.song_b_duration_s || 0;
                 state.currentTime = 0;
-                state.audioBuffers = { mix: null, automix: null, baseline: null };
-
-                // Set initial active mode based on selected strategy
-                if (strategy === 'automix') {
-                    setActiveModeUI('automix');
-                } else if (strategy === 'crossfade') {
-                    setActiveModeUI('baseline');
-                } else {
-                    setActiveModeUI('mix');
-                }
+                state.audioBuffer = null;
 
                 // Update visualizer data
                 if (result.waveform_a) state.visualizerData.mix = result.waveform_a;
@@ -285,8 +269,8 @@
                 document.getElementById('play-btn').disabled = false;
                 document.getElementById('download-btn').disabled = false;
 
-                // Pre-buffer all 3 engine renders in parallel for zero-latency playback & switching
-                preloadAllAudioBuffers();
+                // Pre-buffer DCP master mix for zero-latency playback
+                preloadDcpAudioBuffer();
             } catch (error) {
                 console.error('Generation failed:', error);
                 alert('Failed to generate transition: ' + error.message);
@@ -300,22 +284,6 @@
         // Player controls
         document.getElementById('play-btn').addEventListener('click', togglePlay);
         document.getElementById('stop-btn').addEventListener('click', stopPlayback);
-
-        // Legacy compare checkbox listener
-        const compareToggle = document.getElementById('compare-toggle');
-        if (compareToggle) {
-            compareToggle.addEventListener('change', (e) => {
-                switchPlaybackMode(e.target.checked ? 'mix' : 'baseline');
-            });
-        }
-
-        // 3-Way Engine Mode Pills (DCP | Automix | Crossfade)
-        ['mix', 'automix', 'baseline'].forEach((mode) => {
-            const btn = document.getElementById(`mode-btn-${mode}`);
-            if (btn) {
-                btn.addEventListener('click', () => switchPlaybackMode(mode));
-            }
-        });
 
         // Scrubber
         const scrubber = document.getElementById('scrubber');
@@ -526,59 +494,23 @@
         }
     }
 
-    function getUrlForMode(mode) {
-        if (mode === 'automix') {
-            return state.automixUrl || (state.currentMixId ? `/api/audio/automix_${state.currentMixId}.wav` : null);
-        }
-        if (mode === 'baseline') {
-            return state.baselineUrl || (state.currentMixId ? `/api/audio/baseline_${state.currentMixId}.wav` : null);
-        }
-        return state.mixUrl || (state.currentMixId ? `/api/audio/mix_${state.currentMixId}.wav` : null);
-    }
-
-    function setActiveModeUI(mode) {
-        state.currentMode = mode;
-        ['mix', 'automix', 'baseline'].forEach((m) => {
-            const btn = document.getElementById(`mode-btn-${m}`);
-            if (btn) btn.classList.toggle('active', m === mode);
-        });
-        const compareToggle = document.getElementById('compare-toggle');
-        if (compareToggle) {
-            compareToggle.checked = mode !== 'baseline';
-        }
-    }
-
-    async function fetchAndDecodeBuffer(mode) {
-        if (state.audioBuffers[mode]) return state.audioBuffers[mode];
-        const url = getUrlForMode(mode);
-        if (!url) return null;
+    async function fetchAndDecodeBuffer() {
+        if (state.audioBuffer) return state.audioBuffer;
+        if (!state.mixUrl) return null;
         initAudioContext();
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(`Audio file not found (${mode})`);
+        const response = await fetch(state.mixUrl);
+        if (!response.ok) throw new Error('DCP master audio not found');
         const arrayBuffer = await response.arrayBuffer();
         const decoded = await state.audioContext.decodeAudioData(arrayBuffer);
-        state.audioBuffers[mode] = decoded;
+        state.audioBuffer = decoded;
         return decoded;
     }
 
-    async function preloadAllAudioBuffers() {
-        const badge = document.getElementById('buffer-status-badge');
-        if (badge) {
-            badge.textContent = 'Pre-buffering 3 engines...';
-        }
+    async function preloadDcpAudioBuffer() {
         try {
-            await Promise.all(
-                ['mix', 'automix', 'baseline'].map((m) =>
-                    fetchAndDecodeBuffer(m).catch(() => null)
-                )
-            );
-            if (badge) {
-                badge.textContent = '✓ 3 Engines Buffered (Zero-Latency)';
-            }
+            await fetchAndDecodeBuffer();
         } catch (e) {
-            if (badge) {
-                badge.textContent = 'Ready';
-            }
+            console.warn('Preload failed:', e);
         }
     }
 
@@ -634,53 +566,18 @@
         startAnimationLoop();
     }
 
-    function switchPlaybackMode(newMode) {
-        if (state.currentMode === newMode && state.isPlaying) return;
-        const preservedTime = state.currentTime;
-        setActiveModeUI(newMode);
-
-        // Update transition window markers to reflect the chosen engine
-        if (state.lastResult) {
-            if (newMode === 'automix' && state.lastResult.automix_plan) {
-                state.transitionStartS = state.lastResult.automix_plan.start_time_a_s || 0;
-                state.transitionDurationS = state.lastResult.automix_plan.duration_s || 8;
-            } else if (newMode === 'baseline' && state.lastResult.crossfade_info) {
-                const overlap = state.lastResult.crossfade_info.overlap_s || 8;
-                state.transitionStartS = Math.max(0, (state.songADurationS || 0) - overlap);
-                state.transitionDurationS = overlap;
-            } else {
-                state.transitionStartS = state.lastResult.transition_start_s || 0;
-                state.transitionDurationS = state.lastResult.transition_duration_s || 8;
-            }
-            renderTransitionDetails(state.lastResult);
-        }
-
-        const nextBuf = state.audioBuffers[newMode];
-        if (nextBuf) {
-            state.duration = nextBuf.duration;
-            state.currentTime = Math.min(preservedTime, nextBuf.duration);
-        }
-        renderVisualizer();
-
-        if (state.isPlaying) {
-            playCurrentMode();
-        }
-    }
-
     function playCurrentMode() {
         initAudioContext();
-        const mode = state.currentMode;
-        const url = getUrlForMode(mode);
-        if (!url) return;
+        if (!state.mixUrl) return;
 
-        if (state.audioBuffers[mode]) {
-            startSourceAt(state.audioBuffers[mode], state.currentTime);
+        if (state.audioBuffer) {
+            startSourceAt(state.audioBuffer, state.currentTime);
             return;
         }
 
         const playBtn = document.getElementById('play-btn');
         playBtn.classList.add('loading');
-        fetchAndDecodeBuffer(mode)
+        fetchAndDecodeBuffer()
             .then(audioBuffer => {
                 playBtn.classList.remove('loading');
                 if (audioBuffer) {
@@ -690,6 +587,10 @@
             })
             .catch(err => {
                 playBtn.classList.remove('loading');
+                console.error('Failed to load audio:', err);
+                alert('Failed to load audio: ' + err.message);
+            });
+    }
                 console.error('Failed to load audio:', err);
                 alert('Failed to load audio: ' + err.message);
             });
@@ -1247,27 +1148,16 @@
         const container = document.getElementById('transition-details');
         if (!container || !result) return;
 
-        const mode = state.currentMode;
         const meta = result.metadata || {};
-        const amx = result.automix_plan || {};
-        const xfade = result.crossfade_info || {};
         const tel = result.telemetry || {};
 
-        let engineTitle = 'DCP Studio Producer (Song C)';
-        let timingDetail = `${(result.transition_duration_s || 0).toFixed(2)}s @ ${(result.transition_start_s || 0).toFixed(2)}s`;
-        let alignmentDetail = meta.phase_locked ? 'Downbeat Phase-Locked' : (meta.alignment || 'Stem-Level');
-
-        if (mode === 'automix') {
-            engineTitle = 'Automix (Continuous Flow)';
-            timingDetail = `${(amx.duration_s || 0).toFixed(2)}s (${amx.bars || 1} bars)`;
-            alignmentDetail = amx.phase_locked
-                ? `Phase-Locked (Stretch ${((amx.stretch_ratio_b || 1) - 1) * 100 >= 0 ? '+' : ''}${(((amx.stretch_ratio_b || 1) - 1) * 100).toFixed(1)}%)`
-                : (amx.beat_aligned ? 'Beat-Aligned' : 'Smooth Glide');
-        } else if (mode === 'baseline') {
-            engineTitle = 'Crossfade (Volume Overlap)';
-            timingDetail = `${(xfade.overlap_s || 0).toFixed(2)}s overlap`;
-            alignmentDetail = `Curve: ${(xfade.curve || 'equal_power').toUpperCase()}`;
-        }
+        const engineTitle = meta.studio_remix
+            ? 'DCP Studio Producer ("Song C")'
+            : `DCP Engine (${(result.strategy || 'Studio Remix').toUpperCase()})`;
+        const timingDetail = `${(result.transition_duration_s || 0).toFixed(2)}s bridge @ ${(result.transition_start_s || 0).toFixed(2)}s`;
+        const alignmentDetail = meta.phase_locked
+            ? 'Downbeat-to-Downbeat Phase-Locked'
+            : (meta.alignment || 'AI Phrase-Aligned (12–16 Bars)');
 
         const qcPass = tel.passes_studio_qc !== false;
         const peakStr = typeof tel.true_peak_dbfs === 'number' ? `${tel.true_peak_dbfs.toFixed(2)} dBFS` : 'Clean';
@@ -1276,11 +1166,11 @@
 
         container.innerHTML = `
             <div class="info-item">
-                <span class="info-label">Active Engine</span>
+                <span class="info-label">DCP Engine</span>
                 <span class="info-value">${engineTitle}</span>
             </div>
             <div class="info-item">
-                <span class="info-label">Transition Window</span>
+                <span class="info-label">Bridge Timeline</span>
                 <span class="info-value">${timingDetail}</span>
             </div>
             <div class="info-item">
@@ -1292,21 +1182,17 @@
                 <span class="info-value">${peakStr} / ${rmsStr}</span>
             </div>
             <div class="info-item">
-                <span class="info-label">Stereo Phase &amp; QC</span>
+                <span class="info-label">Stereo Phase &amp; Studio QC</span>
                 <span class="info-value">${corrStr} (${qcPass ? 'PASS' : 'WARN'})</span>
             </div>
         `;
     }
 
     function handleDownload() {
-        const mode = state.currentMode;
-        const prefix = mode === 'automix' ? 'automix' : (mode === 'baseline' ? 'baseline' : 'mix');
-        const filename = `${prefix}_${state.currentMixId || Date.now()}.wav`;
-        const url = getUrlForMode(mode);
-        if (!url) return;
-
+        if (!state.mixUrl) return;
+        const filename = `dcp_mix_${state.currentMixId || Date.now()}.wav`;
         const a = document.createElement('a');
-        a.href = url;
+        a.href = state.mixUrl;
         a.download = filename;
         document.body.appendChild(a);
         a.click();
