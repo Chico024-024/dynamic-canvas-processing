@@ -46,16 +46,38 @@ def decompose_audio_to_stemset(audio: AudioBuffer, label: str = "") -> StemSet:
 
     vocals = np.vstack([mid_center, mid_center]).astype(np.float32)
 
-    # 3. Drums: Transient & percussive frequency band + side punch
-    drums = (np.vstack([mid_side, -mid_side]) * 0.35 + 0.35 * mid_total).astype(np.float32)
+    # 3. Drums: Harmonic-Percussive Source Separation (HPSS, Fitzgerald 2010)
+    # Extracts true transient & percussive onsets via median filtering on spectrogram
+    try:
+        from scipy.ndimage import median_filter
+
+        nperseg = min(1024, max(128, 1 << int(np.floor(np.log2(samples.shape[-1])))))
+        noverlap = nperseg * 3 // 4
+        _, _, Zxx = signal.stft(samples, fs=sr, nperseg=nperseg, noverlap=noverlap, axis=-1)
+        mag = np.abs(Zxx)
+        # Median filter along time (harmonic) vs frequency (percussive)
+        H_med = median_filter(mag, size=(1, 1, 15))
+        P_med = median_filter(mag, size=(1, 15, 1))
+
+        # Soft percussive mask
+        P_mask = (P_med ** 2) / (H_med ** 2 + P_med ** 2 + 1e-9)
+        Z_perc = Zxx * P_mask
+        _, perc_audio = signal.istft(Z_perc, fs=sr, nperseg=nperseg, noverlap=noverlap, time_axis=-1)
+        if perc_audio.shape[-1] >= samples.shape[-1]:
+            drums = perc_audio[:, : samples.shape[-1]].astype(np.float32)
+        else:
+            drums = np.pad(perc_audio, ((0, 0), (0, samples.shape[-1] - perc_audio.shape[-1]))).astype(np.float32)
+    except Exception:
+        drums = (np.vstack([mid_side, -mid_side]) * 0.35 + 0.35 * mid_total).astype(np.float32)
 
     # 4. Other: Highs, synths, stereo residual, ensuring exact reconstruction
     other = (samples - (bass + vocals + drums)).astype(np.float32)
 
+    dsp_label = f"{label}:dsp" if label and not label.endswith(":dsp") else (label or "dsp")
     stems = {
         "bass": AudioBuffer(bass, sr),
         "drums": AudioBuffer(drums, sr),
         "vocals": AudioBuffer(vocals, sr),
         "other": AudioBuffer(other, sr),
     }
-    return StemSet(stems=stems, source_label=label)
+    return StemSet(stems=stems, source_label=dsp_label)

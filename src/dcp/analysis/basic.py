@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import importlib.util
 
 import numpy as np
+from scipy import signal
 from scipy.signal import find_peaks, stft
 
 from .key_detection import detect_key, estimate_downbeats
@@ -158,19 +159,87 @@ def _onset_envelope(
     return flux, hop
 
 
+def _track_beats_and_downbeats(
+    flux: np.ndarray,
+    frame_hz: float,
+    tempo: float,
+    lag: float,
+) -> tuple[tuple[float, ...], tuple[float, ...], float]:
+    """Track beats and 4/4 downbeats via circular vector-sum phase locking on onset flux.
+
+    Returns:
+        (beat_times_s, downbeat_times_s, alignment_score)
+    """
+    n_frames = len(flux)
+    if n_frames < 4 or lag <= 1.0:
+        return (), (), 0.0
+
+    # 1. Circular vector-sum phase lock at the tempo lag
+    indices = np.arange(n_frames, dtype=np.float64)
+    angles = 2.0 * np.pi * indices / lag
+    weights = np.maximum(0.0, flux - np.mean(flux))
+    w_sum = float(np.sum(weights))
+    if w_sum <= 1e-9:
+        weights = np.maximum(0.0, flux)
+        w_sum = float(np.sum(weights))
+
+    if w_sum <= 1e-9:
+        return (), (), 0.0
+
+    x = float(np.sum(weights * np.cos(angles)))
+    y = float(np.sum(weights * np.sin(angles)))
+    phi = float(np.arctan2(y, x)) % (2.0 * np.pi)
+
+    # Offset in frames
+    phi_frames = (phi / (2.0 * np.pi)) * lag
+    first_beat = phi_frames
+    while first_beat >= lag:
+        first_beat -= lag
+    while first_beat < 0:
+        first_beat += lag
+
+    beat_frames = np.arange(first_beat, n_frames, lag)
+    if len(beat_frames) == 0:
+        return (), (), 0.0
+
+    beat_times = tuple(float(f / frame_hz) for f in beat_frames)
+
+    # 2. Downbeat tracking (4-beat bar phase lock)
+    bar_energies = np.zeros(4, dtype=np.float64)
+    for phase_idx in range(4):
+        p_frames = beat_frames[phase_idx::4]
+        valid_p = [int(round(bf)) for bf in p_frames if 0 <= int(round(bf)) < n_frames]
+        if valid_p:
+            bar_energies[phase_idx] = float(np.sum(flux[valid_p]))
+
+    best_bar_phase = int(np.argmax(bar_energies))
+    downbeat_times = tuple(beat_times[best_bar_phase::4])
+
+    # 3. Alignment score: flux at beat positions vs overall flux
+    valid_beat_indices = [int(round(bf)) for bf in beat_frames if 0 <= int(round(bf)) < n_frames]
+    mean_beat_flux = float(np.mean(flux[valid_beat_indices])) if valid_beat_indices else 0.0
+    global_mean_flux = float(np.mean(flux))
+    score = 0.0
+    if global_mean_flux > 1e-9:
+        ratio = mean_beat_flux / global_mean_flux
+        score = float(np.clip((ratio - 1.0) / 1.5, 0.0, 1.0))
+
+    return beat_times, downbeat_times, score
+
+
 def _estimate_tempo(
     mono: np.ndarray, sample_rate: int, config: AnalysisConfig
-) -> tuple[float | None, float, int, bool]:
+) -> tuple[float | None, float, int, bool, tuple[float, ...], tuple[float, ...]]:
     min_bpm = max(1.0, float(config.tempo_min_bpm))
     max_bpm = max(min_bpm + 1.0, float(config.tempo_max_bpm))
     flux, hop = _onset_envelope(mono, sample_rate, config)
     if flux.size < 16:
-        return None, 0.0, 0, False
+        return None, 0.0, 0, False, (), ()
 
     normalized = flux - float(np.mean(flux))
     energy = float(np.sqrt(np.mean(np.square(normalized))))
     if energy < 1e-9:
-        return None, 0.0, 0, False
+        return None, 0.0, 0, False, (), ()
 
     frame_count = normalized.size
     fft_size = 1 << (2 * frame_count - 1).bit_length()
@@ -178,7 +247,7 @@ def _estimate_tempo(
     autocorrelation = np.fft.irfft(spectrum * np.conj(spectrum), n=fft_size)
     autocorrelation = autocorrelation[:frame_count]
     if autocorrelation[0] <= 0:
-        return None, 0.0, 0, False
+        return None, 0.0, 0, False, (), ()
     autocorrelation = autocorrelation / autocorrelation[0]
 
     frame_hz = sample_rate / hop
@@ -187,7 +256,7 @@ def _estimate_tempo(
     lag_min = max(2, lag_min)
     lag_max = min(frame_count - 2, lag_max)
     if lag_max <= lag_min:
-        return None, 0.0, 0, False
+        return None, 0.0, 0, False, (), ()
 
     search = autocorrelation[lag_min : lag_max + 1]
     best_offset = int(np.argmax(search))
@@ -214,7 +283,7 @@ def _estimate_tempo(
 
     tempo = 60.0 * frame_hz / refined_lag
     if not min_bpm - 2.0 <= tempo <= max_bpm + 2.0:
-        return None, confidence, 0, ambiguous
+        return None, confidence, 0, ambiguous, (), ()
 
     peak_height = float(np.mean(flux) + np.std(flux))
     peaks, _ = find_peaks(
@@ -222,7 +291,14 @@ def _estimate_tempo(
         height=peak_height,
         distance=max(1, int(round(0.08 * frame_hz))),
     )
-    return float(tempo), confidence, int(len(peaks)), ambiguous
+
+    beat_times, downbeats, beat_score = _track_beats_and_downbeats(flux, frame_hz, float(tempo), refined_lag)
+    combined_confidence = float(np.clip(0.6 * confidence + 0.4 * beat_score, 0.0, 1.0))
+    if combined_confidence < config.tempo_confidence_threshold or beat_score < 0.15 or len(peaks) < 4:
+        beat_times = ()
+        downbeats = ()
+
+    return float(tempo), combined_confidence, int(len(peaks)), ambiguous, beat_times, downbeats
 
 
 def _compute_loudness(
@@ -230,30 +306,43 @@ def _compute_loudness(
 ) -> tuple[float | None, float | None, float | None]:
     """Compute EBU R128 loudness metrics (LUFS, LRA, True Peak).
 
-    Returns:
-        (integrated_loudness_lufs, loudness_range_lu, true_peak_dbtp)
-        Returns (None, None, None) if pyloudnorm is not available.
+    Uses pyloudnorm if available; falls back to an ITU-R BS.1770 K-weighting filter proxy.
     """
-    if not _PYLOUDNORM_AVAILABLE:
-        return None, None, None
+    if _PYLOUDNORM_AVAILABLE:
+        try:
+            import pyloudnorm as pyln
 
+            mono = buffer.mono()
+            meter = pyln.Meter(buffer.sample_rate)
+            integrated_loudness = meter.integrated_loudness(mono)
+            lra = meter.loudness_range(mono)
+            true_peak = amplitude_to_dbfs(buffer.peak)
+
+            return float(integrated_loudness), float(lra), float(true_peak)
+        except Exception:
+            pass
+
+    # Pure NumPy / SciPy ITU-R BS.1770 K-weighting filter proxy
     try:
-        import pyloudnorm as pyln
-
+        sr = buffer.sample_rate
         mono = buffer.mono()
-        # pyloudnorm expects (channels, samples) or (samples,)
-        # Our buffer is already in float64
-        meter = pyln.Meter(buffer.sample_rate)
-        integrated_loudness = meter.integrated_loudness(mono)
+        # Stage 1: High-pass filter (~38 Hz 2nd-order Butterworth)
+        f_hp = min(38.0, 0.45 * (sr / 2.0))
+        sos_hp = signal.butter(2, f_hp, "highpass", fs=sr, output="sos")
+        y = signal.sosfilt(sos_hp, mono.astype(np.float64))
 
-        # Loudness Range (LRA)
-        lra = meter.loudness_range(mono)
+        # Stage 2: High-shelf boost (~1500 Hz, +4 dB)
+        f_hs = min(1500.0, 0.45 * (sr / 2.0))
+        sos_hs = signal.butter(1, f_hs, "highpass", fs=sr, output="sos")
+        y_k = y + 0.585 * signal.sosfilt(sos_hs, y)
 
-        # True Peak - use peak of upsampled signal
-        # Simple approximation: use sample peak with a small headroom
-        true_peak = amplitude_to_dbfs(buffer.peak)
-
-        return float(integrated_loudness), float(lra), float(true_peak)
+        mean_sq = float(np.mean(y_k ** 2))
+        if mean_sq > 1e-12:
+            lufs = -0.691 + 10.0 * np.log10(mean_sq)
+        else:
+            lufs = -120.0
+        peak = amplitude_to_dbfs(buffer.peak)
+        return float(lufs), None, float(peak)
     except Exception:
         return None, None, None
 
@@ -341,6 +430,8 @@ def analyze_track(
     confidence = 0.0
     onset_count = 0
     ambiguous = False
+    beat_times: tuple[float, ...] = ()
+    downbeat_times: tuple[float, ...] = ()
     notes: list[str] = []
     detected_key: str | None = None
     detected_key_confidence = 0.0
@@ -349,7 +440,7 @@ def analyze_track(
     if buffer.duration_s >= 1.0:
         mono = buffer.mono()
         try:
-            tempo, confidence, onset_count, ambiguous = _estimate_tempo(
+            tempo, confidence, onset_count, ambiguous, beat_times, downbeat_times = _estimate_tempo(
                 mono, buffer.sample_rate, cfg
             )
         except Exception as exc:  # analysis must never prevent the rest of DCP
@@ -396,10 +487,9 @@ def analyze_track(
 
     # Add loudness note if available
     if loudness_lufs is not None:
-        notes.append(
-            f"Integrated loudness: {loudness_lufs:.1f} LUFS "
-            f"(LRA: {loudness_lra:.1f} LU, True Peak: {loudness_true_peak:.1f} dBTP)."
-        )
+        lra_part = f" (LRA: {loudness_lra:.1f} LU)" if loudness_lra is not None else ""
+        tp_part = f", True Peak: {loudness_true_peak:.1f} dBTP" if loudness_true_peak is not None else ""
+        notes.append(f"Integrated loudness: {loudness_lufs:.1f} LUFS{lra_part}{tp_part}.")
 
     return TrackAnalysis(
         duration_s=buffer.duration_s,
@@ -412,6 +502,8 @@ def analyze_track(
         tempo_confidence=confidence,
         onset_count=onset_count,
         tempo_ambiguous=ambiguous,
+        beat_times_s=beat_times,
+        downbeat_times_s=downbeat_times,
         notes=tuple(notes),
         key=detected_key,
         key_confidence=detected_key_confidence,

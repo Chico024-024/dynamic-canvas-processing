@@ -344,6 +344,7 @@ def _conservative_plan(
     requested_strategy: str,
     extra_warnings: list[str],
     prefix_reasoning: str = "",
+    extra_metadata: dict[str, object] | None = None,
 ) -> TransitionPlan:
     duration, duration_warnings = _clamp_requested_duration(
         context, context.requested_duration_s
@@ -364,6 +365,9 @@ def _conservative_plan(
             "The requested strategy could not be applied; the conservative "
             "fallback was rendered instead."
         )
+    meta: dict[str, object] = {"fallback": requested_strategy != "conservative"}
+    if extra_metadata:
+        meta.update(extra_metadata)
     return _make_plan(
         context,
         strategy="conservative",
@@ -371,7 +375,7 @@ def _conservative_plan(
         automations=_full_mix_automations(context, duration, curve="smoothstep"),
         reasoning=reasoning,
         warnings=warnings,
-        metadata={"fallback": requested_strategy != "conservative"},
+        metadata=meta,
     )
 
 
@@ -1216,56 +1220,53 @@ class StudioRemixStrategy:
                 bridge_bars=8,
             )
             if not anchor_result.success:
-                warnings.append(
-                    f"Studio Remix heuristic anchors unavailable ({anchor_result.fallback_reason}); "
-                    "synthesizing standard 12-bar Producer Matrix anchors."
+                return _conservative_plan(
+                    context,
+                    requested_strategy=context.requested_strategy,
+                    extra_warnings=[
+                        f"Studio Remix anchors unusable ({anchor_result.fallback_reason}); "
+                        "degraded to clean transition."
+                    ],
+                    prefix_reasoning=(
+                        f"Studio Remix could not identify reliable phrase anchors ({anchor_result.fallback_reason}). "
+                        "Degraded to clean transition."
+                    ),
+                    extra_metadata={"studio_remix": True, "degraded": True},
                 )
-                tempo_a = context.analysis_a.tempo_bpm or 120.0
-                tempo_b = context.analysis_b.tempo_bpm or 120.0
-                beat_duration_a = 60.0 / tempo_a
-                beat_duration_b = 60.0 / tempo_b
-                bar_duration_a = beat_duration_a * 4.0
-                bar_duration_b = beat_duration_b * 4.0
-                lead_in_bars = 2
-                launchpad_a = max(0.0, context.song_a.duration_s - 4.0 * bar_duration_a)
-                impact_b = min(context.song_b.duration_s * 0.35, 4.0 * bar_duration_b)
-                breath_start = max(0.0, impact_b - 0.5 * bar_duration_b)
-                breath_end = impact_b
-                bridge_start_a = max(0.0, launchpad_a - lead_in_bars * bar_duration_a)
-                archetype = "VACUUM_BREATH_DROP"
-                transition_mode = "CONTINUOUS_TEMPO_WARP"
-                feasibility_score = 0.70
-                composer_rationale = f"Synthesized phrase anchors after {anchor_result.fallback_reason}."
-                breath_beats = 2
-                anchor_conf = 0.70
-            else:
-                archetype = "VACUUM_BREATH_DROP"
-                transition_mode = "CONTINUOUS_TEMPO_WARP"
-                feasibility_score = anchor_result.confidence
-                composer_rationale = "Phrase-aligned heuristic launchpad selection."
-                launchpad_a = anchor_result.launchpad_a_s
-                impact_b = anchor_result.impact_b_s
-                breath_start = anchor_result.breath_window_start_s
-                breath_end = anchor_result.breath_window_end_s
-                bridge_start_a = anchor_result.bridge_start_a_s
-                lead_in_bars = anchor_result.lead_in_bars
-                tempo_a = anchor_result.tempo_a_bpm or context.analysis_a.tempo_bpm
-                tempo_b = anchor_result.tempo_b_bpm or context.analysis_b.tempo_bpm
 
-                if tempo_a is None or tempo_b is None:
-                    return _conservative_plan(
-                        context,
-                        requested_strategy=context.requested_strategy,
-                        extra_warnings=["Tempo unavailable for Studio Remix timing."],
-                        prefix_reasoning="Tempo detection failed for one or both tracks.",
-                    )
+            archetype = "VACUUM_BREATH_DROP"
+            transition_mode = "CONTINUOUS_TEMPO_WARP"
+            feasibility_score = anchor_result.confidence
+            composer_rationale = "Phrase-aligned heuristic launchpad selection."
+            launchpad_a = anchor_result.launchpad_a_s
+            impact_b = anchor_result.impact_b_s
+            breath_start = anchor_result.breath_window_start_s
+            breath_end = anchor_result.breath_window_end_s
+            bridge_start_a = anchor_result.bridge_start_a_s
+            lead_in_bars = anchor_result.lead_in_bars
+            tempo_a = anchor_result.tempo_a_bpm or context.analysis_a.tempo_bpm
+            tempo_b = anchor_result.tempo_b_bpm or context.analysis_b.tempo_bpm
 
-                beat_duration_a = 60.0 / tempo_a
-                beat_duration_b = 60.0 / tempo_b
-                bar_duration_a = beat_duration_a * 4.0
-                bar_duration_b = beat_duration_b * 4.0
-                breath_beats = 2 if breath_end > breath_start else 0
-                anchor_conf = anchor_result.confidence
+            if tempo_a is None or tempo_b is None:
+                return _conservative_plan(
+                    context,
+                    requested_strategy=context.requested_strategy,
+                    extra_warnings=[
+                        "Studio Remix tempo estimation unavailable; "
+                        "conservative fallback used."
+                    ],
+                    prefix_reasoning=(
+                        "Studio Remix requires reliable tempo estimates. "
+                        "Estimates were unavailable or below threshold."
+                    ),
+                )
+
+            beat_duration_a = 60.0 / tempo_a
+            beat_duration_b = 60.0 / tempo_b
+            bar_duration_a = beat_duration_a * 4.0
+            bar_duration_b = beat_duration_b * 4.0
+            breath_beats = 2 if breath_end > breath_start else 0
+            anchor_conf = anchor_result.confidence
 
         # Determine effective bar duration across the transition
         bar_duration_a = 4.0 * 60.0 / max(20.0, tempo_a)
@@ -1326,8 +1327,11 @@ class StudioRemixStrategy:
 
         bridge_start_a = max(0.0, launchpad_a - t_impact)
         if bridge_start_a + duration > context.song_a.duration_s:
-            bridge_start_a = max(0.0, context.song_a.duration_s - duration)
-            t_impact = min(duration - 0.05, max(0.35 * duration, launchpad_a - bridge_start_a))
+            # Bar-shrink: shrink duration to fit Song A without dragging bridge_start_a backward
+            duration = min(duration, max(t_impact + 0.5, context.song_a.duration_s - bridge_start_a))
+            if bridge_start_a + duration > context.song_a.duration_s:
+                bridge_start_a = max(0.0, context.song_a.duration_s - duration)
+            t_impact = min(duration - 0.05, max(0.20 * duration, launchpad_a - bridge_start_a))
             t_intro = t_impact * 0.5
             t_breath = max(0.0, t_impact - breath_dur) if breath_dur > 0 else t_impact
 
@@ -1347,9 +1351,18 @@ class StudioRemixStrategy:
             # Cap lead-in first to what Song B can reach
             max_lead_in = max(0.0, impact_b * warp_stretch)
             t_impact = min(t_impact, max_lead_in)
+            # Recalculate bars and duration to shrink the post-impact window proportionally
+            lead_in_bars = max(1, int(round(t_impact / max(0.5, effective_bar_s))))
+            ghost_bars = max(2, lead_in_bars // 2)
+            total_bridge_bars = lead_in_bars + ghost_bars
+            duration = min(duration, total_bridge_bars * effective_bar_s)
+
             bridge_start_a = max(0.0, launchpad_a - t_impact)
             if bridge_start_a + duration > context.song_a.duration_s:
-                bridge_start_a = max(0.0, context.song_a.duration_s - duration)
+                duration = min(duration, max(t_impact + 0.5, context.song_a.duration_s - bridge_start_a))
+                if bridge_start_a + duration > context.song_a.duration_s:
+                    bridge_start_a = max(0.0, context.song_a.duration_s - duration)
+
             # Re-anchor: keep launchpad_a - bridge_start_a matched to t_impact within max_lead_in
             t_impact = min(max_lead_in, max(0.0, launchpad_a - bridge_start_a))
             t_intro = t_impact * 0.5

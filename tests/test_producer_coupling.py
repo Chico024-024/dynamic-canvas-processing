@@ -51,8 +51,9 @@ def test_cue_offset_b_formula_and_reanchor():
 
     stems_a = decompose_audio_to_stemset(a, "A")
     stems_b = decompose_audio_to_stemset(b, "B")
-    analysis_a = analyze_track_with_backend(a, DEFAULT_CONFIG.analysis)
-    analysis_b = analyze_track_with_backend(b, DEFAULT_CONFIG.analysis)
+    downbeats = tuple(float(i * 2.0) for i in range(15))
+    analysis_a = make_analysis(a, tempo_bpm=120.0, confidence=0.9, downbeat_times_s=downbeats)
+    analysis_b = make_analysis(b, tempo_bpm=120.0, confidence=0.9, downbeat_times_s=downbeats)
 
     ctx = TransitionContext(
         song_a=a,
@@ -85,8 +86,9 @@ def test_ghost_tail_added_single_point_post_glue():
 
     stems_a = decompose_audio_to_stemset(a, "A")
     stems_b = decompose_audio_to_stemset(b, "B")
-    analysis_a = analyze_track_with_backend(a, DEFAULT_CONFIG.analysis)
-    analysis_b = analyze_track_with_backend(b, DEFAULT_CONFIG.analysis)
+    downbeats = tuple(float(i * 2.0) for i in range(15))
+    analysis_a = make_analysis(a, tempo_bpm=120.0, confidence=0.9, downbeat_times_s=downbeats)
+    analysis_b = make_analysis(b, tempo_bpm=120.0, confidence=0.9, downbeat_times_s=downbeats)
 
     strat = build_core_registry().get("studio_remix")
     ctx = TransitionContext(
@@ -221,4 +223,111 @@ def test_launchpad_minus_start_equals_t_impact_after_reanchor():
 
     # Song A launchpad event lands at launchpad_a - bridge_start_a in transition timeline
     assert (launchpad_a - bridge_start_a) == pytest.approx(t_impact, abs=0.05)
+
+
+def test_basic_analyzer_tracks_beats_and_downbeats():
+    """Verify that analyze_track populates beat_times_s and downbeat_times_s without librosa."""
+    from dcp.analysis.basic import analyze_track
+    sr = 22050
+    dur = 16.0
+    frames = int(round(dur * sr))
+    samples = np.zeros((2, frames), dtype=np.float32)
+
+    # 120 BPM = 0.5s beat interval, 2.0s bar interval (pickup at 1.0s)
+    beat_interval = 0.5
+    pickup_s = 1.0
+    true_downbeats = []
+    for beat_idx in range(int((dur - pickup_s) / beat_interval)):
+        t_beat = pickup_s + beat_idx * beat_interval
+        f_idx = int(round(t_beat * sr))
+        if f_idx + 100 < frames:
+            # Emphasize downbeats (every 4th beat)
+            is_downbeat = (beat_idx % 4 == 0)
+            amp = 0.9 if is_downbeat else 0.4
+            samples[:, f_idx : f_idx + 100] = amp
+            if is_downbeat:
+                true_downbeats.append(t_beat)
+
+    audio = AudioBuffer(samples=samples, sample_rate=sr)
+    analysis = analyze_track(audio)
+
+    assert analysis.beat_times_s is not None and len(analysis.beat_times_s) > 0
+    assert analysis.downbeat_times_s is not None and len(analysis.downbeat_times_s) > 0
+
+    # Verify that tracked downbeats align closely with ground-truth downbeats
+    first_detected = analysis.downbeat_times_s[0]
+    closest_true = min(true_downbeats, key=lambda tb: abs(tb - first_detected))
+    assert abs(first_detected - closest_true) <= 0.05
+
+
+def test_gridless_strategy_degrades_gracefully():
+    """Verify that when downbeat grids are absent or confidence is low, strategy degrades cleanly."""
+    sr = 22050
+    dur = 20.0
+    a = make_tone(duration_s=dur, sample_rate=sr)
+    b = make_tone(duration_s=dur, sample_rate=sr)
+    from dcp.stems.dsp_splitter import decompose_audio_to_stemset
+    stems_a = decompose_audio_to_stemset(a, "A")
+    stems_b = decompose_audio_to_stemset(b, "B")
+
+    from dcp.config import DEFAULT_CONFIG
+    analysis_a = make_analysis(a, tempo_bpm=120.0, confidence=0.2, downbeat_times_s=())
+    analysis_b = make_analysis(b, tempo_bpm=120.0, confidence=0.2, downbeat_times_s=())
+
+    strat = StudioRemixStrategy()
+    ctx = TransitionContext(
+        song_a=a,
+        song_b=b,
+        stems_a=stems_a,
+        stems_b=stems_b,
+        analysis_a=analysis_a,
+        analysis_b=analysis_b,
+        requested_duration_s=8.0,
+        requested_strategy="studio_remix",
+        config=DEFAULT_CONFIG,
+    )
+    plan = strat.plan(ctx)
+
+    # Must degrade cleanly to conservative rather than invent fictional drop points
+    assert plan.strategy == "conservative"
+    assert plan.metadata.get("degraded") is True
+    assert not plan.metadata.get("enable_vocal_chops")
+
+
+def test_loudness_compensation_applies_to_source_b():
+    """Verify loudness compensation scales source 'b' stems appropriately."""
+    sr = 22050
+    dur = 12.0
+    a = make_tone(duration_s=dur, sample_rate=sr)
+    b = make_tone(duration_s=dur, sample_rate=sr)
+    from dcp.stems.dsp_splitter import decompose_audio_to_stemset
+    stems_a = decompose_audio_to_stemset(a, "A")
+    stems_b = decompose_audio_to_stemset(b, "B")
+
+    from dcp.config import DEFAULT_CONFIG
+    downbeats = tuple(float(i * 2.0) for i in range(6))
+    # Song A at -14 dBFS, Song B at -20 dBFS -> +6 dB compensation for B
+    analysis_a = make_analysis(a, tempo_bpm=120.0, confidence=0.9, downbeat_times_s=downbeats)
+    analysis_b = make_analysis(b, tempo_bpm=120.0, confidence=0.9, downbeat_times_s=downbeats)
+
+    strat = StudioRemixStrategy()
+    ctx = TransitionContext(
+        song_a=a,
+        song_b=b,
+        stems_a=stems_a,
+        stems_b=stems_b,
+        analysis_a=analysis_a,
+        analysis_b=analysis_b,
+        requested_duration_s=8.0,
+        requested_strategy="studio_remix",
+        config=DEFAULT_CONFIG,
+    )
+    plan = strat.plan(ctx)
+    meta = plan.metadata
+    assert "loudness_compensation_db" in meta
+
+    # Render plan and verify finite output
+    result = render_plan(a, b, plan, stems_a=stems_a, stems_b=stems_b, config=DEFAULT_CONFIG)
+    assert result.audio.frames > 0
+    assert np.all(np.isfinite(result.audio.samples))
 

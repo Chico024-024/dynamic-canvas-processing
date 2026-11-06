@@ -75,7 +75,7 @@ def test_analyze_accepts_explicit_basic_backend(tmp_path, capsys):
     captured = capsys.readouterr()
     assert code == 0, captured.err
     assert "Analyzer:       basic" in captured.out
-    assert "Detected beats: 0" in captured.out
+    assert "Detected beats:" in captured.out
 
 
 @pytest.mark.skipif(

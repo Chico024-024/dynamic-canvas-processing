@@ -324,10 +324,10 @@ def render_plan(
     dcp_feat = cfg.dcp_features
     meta_feat = plan.metadata.get("dcp_features") if isinstance(plan.metadata.get("dcp_features"), dict) else {}
 
-    def _feat_bool(attr: str) -> bool:
+    def _feat_bool(attr: str, default: bool = True) -> bool:
         if attr in meta_feat:
             return bool(meta_feat[attr])
-        return bool(getattr(dcp_feat, attr, True))
+        return bool(getattr(dcp_feat, attr, default))
 
     def _feat_float(attr: str, default: float) -> float:
         if attr in meta_feat and meta_feat[attr] is not None:
@@ -343,6 +343,17 @@ def render_plan(
     enable_master_glue = _feat_bool("enable_master_glue")
     enable_tempo_lock = _feat_bool("enable_tempo_lock")
     edge_xfade_ms = _feat_float("effect_edge_crossfade_ms", 6.0)
+
+    # Stem Quality Guard: If stems are from the DSP fallback tier, auto-disable features
+    # that produce muddy artifacts on un-isolated stems unless explicitly forced
+    is_dsp_tier = False
+    if stems_a and "dsp" in (stems_a.source_label or "").lower():
+        is_dsp_tier = True
+    if stems_b and "dsp" in (stems_b.source_label or "").lower():
+        is_dsp_tier = True
+    if is_dsp_tier and not _feat_bool("dcp_force_dsp_features", False):
+        enable_vocal_chops = False
+        enable_drum_regroove = False
 
     def resolve(source: str, stem: str) -> AudioBuffer:
         key = (source, stem)
@@ -527,7 +538,7 @@ def render_plan(
         )
 
         stem_gain_multiplier = 1.0
-        if plan.metadata.get("studio_remix") and automation.source == "B":
+        if plan.metadata.get("studio_remix") and str(automation.source).lower() == "b":
             comp_db = float(plan.metadata.get("loudness_compensation_db", 0.0) or 0.0)
             if abs(comp_db) > 0.01:
                 stem_gain_multiplier = 10.0 ** (comp_db / 20.0)

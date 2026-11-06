@@ -349,6 +349,20 @@ class DCPWebStudioHandler(SimpleHTTPRequestHandler):
                     stems_a, backend_a = separate_hierarchical(song_a, label="A")
                     stems_b, backend_b = separate_hierarchical(song_b, label="B")
 
+                    # Stem Quality Guard: When falling back to DSP filterbank, auto-disable features
+                    # that corrupt un-isolated pads/reverb tails into watery chops or noisy regrooving
+                    if backend_a == "dsp" or backend_b == "dsp":
+                        force_dsp = feature_flags.get("dcp_force_dsp_features", False)
+                        if not force_dsp:
+                            dcp_feat_cfg = replace(
+                                dcp_feat_cfg,
+                                enable_vocal_chops=False,
+                                enable_drum_regroove=False,
+                                enable_fdn_freeze=False,
+                                enable_sidechain_duck=False,
+                            )
+                            request_config = replace(request_config, dcp_features=dcp_feat_cfg)
+
                 # Build transition context for DCP
                 context = TransitionContext(
                     song_a=song_a,
