@@ -390,3 +390,54 @@ def test_render_rejects_negative_cue_offset():
     with pytest.raises(RenderError, match="cannot be negative"):
         render_plan(song_a, song_b, plan)
 
+
+def test_degraded_conservative_plan_applies_loudness_comp_without_generative_assets():
+    """Verify that degraded plans apply loudness comp to Song B without triggering generative Song C assets."""
+    sr = 44100
+    song_a = make_tone(duration_s=4.0, frequency=440.0, sample_rate=sr)
+    song_b = make_tone(duration_s=4.0, frequency=880.0, sample_rate=sr)
+
+    # In a degraded plan, B enters with loudness compensation (+3.0 dB)
+    comp_db = 3.0
+    expected_gain = 10.0 ** (comp_db / 20.0)
+
+    points_a = (GainPoint(0.0, 0.0), GainPoint(2.0, -60.0))
+    points_b = (GainPoint(0.0, -60.0), GainPoint(2.0, 0.0))
+
+    # Test degraded plan: studio_remix=True, degraded=True
+    plan_degraded = TransitionPlan(
+        strategy="conservative",
+        requested_strategy="studio_remix",
+        duration_s=2.0,
+        start_time_s=1.0,
+        end_time_s=3.0,
+        automations=(
+            StemAutomation(source="a", stem=MIX_STEM, points=points_a, curve="linear"),
+            StemAutomation(source="b", stem=MIX_STEM, points=points_b, curve="linear"),
+        ),
+        metadata={
+            "studio_remix": True,
+            "degraded": True,
+            "loudness_compensation_db": comp_db,
+        },
+    )
+
+    rendered = render_plan(song_a, song_b, plan_degraded)
+    
+    # In Song B's exclusive region after the transition (t > 3.0s, e.g. 3.2s to 3.8s),
+    # Song B should be boosted by exactly expected_gain (+3.0 dB ~= 1.4125x)
+    # and no generative assets (like reverse crash, sub-808, riser) should have been added.
+    out_samples = rendered.audio.samples[0]
+    
+    b_out_start = int(3.2 * sr)
+    b_out_end = int(3.8 * sr)
+    raw_b_start = int(2.2 * sr)
+    raw_b_end = int(2.8 * sr)
+
+    measured_rms = np.sqrt(np.mean(np.square(out_samples[b_out_start:b_out_end])))
+    raw_b_rms = np.sqrt(np.mean(np.square(song_b.samples[0, raw_b_start:raw_b_end])))
+    
+    actual_gain = measured_rms / raw_b_rms
+    assert abs(actual_gain - expected_gain) < 0.01, f"Expected gain {expected_gain:.4f}, got {actual_gain:.4f}"
+
+

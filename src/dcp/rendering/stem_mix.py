@@ -551,7 +551,7 @@ def render_plan(
         ] += processed[:, :available] * (gains[np.newaxis, :available] * stem_gain_multiplier)
 
     # Inject bespoke synthesized transitional elements for Studio Remix (Song C)
-    if plan.metadata.get("studio_remix"):
+    if plan.metadata.get("studio_remix") and not plan.metadata.get("degraded", False):
         t_impact_rel = float(plan.metadata.get("t_impact_s", plan.duration_s * (2.0 / 3.0)))
         t_intro_rel = float(plan.metadata.get("t_intro_s", t_impact_rel * 0.5))
         t_breath_rel = float(plan.metadata.get("t_breath_s", max(0.0, t_impact_rel - 0.25)))
