@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from typing import Protocol, runtime_checkable
 
+import numpy as np
+
 from ..config import DCPConfig
 from ..models import DCPError, MIX_STEM, AudioBuffer, StemSet
 from .context import TransitionContext
@@ -365,7 +367,23 @@ def _conservative_plan(
             "The requested strategy could not be applied; the conservative "
             "fallback was rendered instead."
         )
-    meta: dict[str, object] = {"fallback": requested_strategy != "conservative"}
+
+    l_a = (
+        context.analysis_a.loudness_lufs
+        if context.analysis_a and context.analysis_a.loudness_lufs is not None
+        else (context.analysis_a.rms_dbfs if context.analysis_a else None)
+    )
+    l_b = (
+        context.analysis_b.loudness_lufs
+        if context.analysis_b and context.analysis_b.loudness_lufs is not None
+        else (context.analysis_b.rms_dbfs if context.analysis_b else None)
+    )
+    loudness_comp_db = float(np.clip(l_a - l_b, -12.0, 12.0)) if (l_a is not None and l_b is not None) else 0.0
+
+    meta: dict[str, object] = {
+        "fallback": requested_strategy != "conservative",
+        "loudness_compensation_db": round(loudness_comp_db, 2),
+    }
     if extra_metadata:
         meta.update(extra_metadata)
     return _make_plan(

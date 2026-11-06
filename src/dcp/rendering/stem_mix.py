@@ -538,7 +538,7 @@ def render_plan(
         )
 
         stem_gain_multiplier = 1.0
-        if plan.metadata.get("studio_remix") and str(automation.source).lower() == "b":
+        if str(automation.source).lower() == "b":
             comp_db = float(plan.metadata.get("loudness_compensation_db", 0.0) or 0.0)
             if abs(comp_db) > 0.01:
                 stem_gain_multiplier = 10.0 ** (comp_db / 20.0)

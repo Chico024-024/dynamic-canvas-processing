@@ -159,87 +159,70 @@ def _onset_envelope(
     return flux, hop
 
 
-def _track_beats_and_downbeats(
+def _comb_phase_and_beats(
     flux: np.ndarray,
-    frame_hz: float,
-    tempo: float,
-    lag: float,
-) -> tuple[tuple[float, ...], tuple[float, ...], float]:
-    """Track beats and 4/4 downbeats via circular vector-sum phase locking on onset flux.
+    lam: float,
+    hop: int,
+    sample_rate: int,
+    window: int | None = None,
+) -> tuple[float, float, tuple[float, ...]]:
+    """Compute circular vector-sum comb strength, beat phase, and locally refined beat times."""
+    n_frames = flux.size
+    if n_frames < 8 or lam <= 1.0:
+        return 0.0, 0.0, ()
 
-    Returns:
-        (beat_times_s, downbeat_times_s, alignment_score)
-    """
-    n_frames = len(flux)
-    if n_frames < 4 or lag <= 1.0:
-        return (), (), 0.0
-
-    # 1. Circular vector-sum phase lock at the tempo lag
-    indices = np.arange(n_frames, dtype=np.float64)
-    angles = 2.0 * np.pi * indices / lag
-    weights = np.maximum(0.0, flux - np.mean(flux))
-    w_sum = float(np.sum(weights))
+    w = np.maximum(flux - float(np.mean(flux)), 0.0)
+    w_sum = float(np.sum(w))
     if w_sum <= 1e-9:
-        weights = np.maximum(0.0, flux)
-        w_sum = float(np.sum(weights))
+        return 0.0, 0.0, ()
 
-    if w_sum <= 1e-9:
-        return (), (), 0.0
+    phase_x = np.mod(np.arange(n_frames, dtype=np.float64) / lam, 1.0)
+    z = np.sum(w * np.exp(2j * np.pi * phase_x))
+    phi = float(np.angle(z) / (2.0 * np.pi)) % 1.0
+    comb = float(np.abs(z) / w_sum)
 
-    x = float(np.sum(weights * np.cos(angles)))
-    y = float(np.sum(weights * np.sin(angles)))
-    phi = float(np.arctan2(y, x)) % (2.0 * np.pi)
+    # Generate candidate beat frames k * lam + phi * lam and snap +-2 frames to local flux peak
+    k_max = int(np.floor((n_frames - 1 - phi * lam) / lam))
+    if k_max < 0:
+        return comb, phi, ()
 
-    # Offset in frames
-    phi_frames = (phi / (2.0 * np.pi)) * lag
-    first_beat = phi_frames
-    while first_beat >= lag:
-        first_beat -= lag
-    while first_beat < 0:
-        first_beat += lag
+    raw_frames = np.arange(k_max + 1, dtype=np.float64) * lam + phi * lam
+    refined_frames: list[int] = []
+    for rf in raw_frames:
+        center = int(round(float(rf)))
+        lo = max(0, center - 2)
+        hi = min(n_frames - 1, center + 2)
+        if hi >= lo:
+            best_f = lo + int(np.argmax(flux[lo : hi + 1]))
+            if not refined_frames or best_f > refined_frames[-1]:
+                refined_frames.append(best_f)
 
-    beat_frames = np.arange(first_beat, n_frames, lag)
-    if len(beat_frames) == 0:
-        return (), (), 0.0
-
-    beat_times = tuple(float(f / frame_hz) for f in beat_frames)
-
-    # 2. Downbeat tracking (4-beat bar phase lock)
-    bar_energies = np.zeros(4, dtype=np.float64)
-    for phase_idx in range(4):
-        p_frames = beat_frames[phase_idx::4]
-        valid_p = [int(round(bf)) for bf in p_frames if 0 <= int(round(bf)) < n_frames]
-        if valid_p:
-            bar_energies[phase_idx] = float(np.sum(flux[valid_p]))
-
-    best_bar_phase = int(np.argmax(bar_energies))
-    downbeat_times = tuple(beat_times[best_bar_phase::4])
-
-    # 3. Alignment score: flux at beat positions vs overall flux
-    valid_beat_indices = [int(round(bf)) for bf in beat_frames if 0 <= int(round(bf)) < n_frames]
-    mean_beat_flux = float(np.mean(flux[valid_beat_indices])) if valid_beat_indices else 0.0
-    global_mean_flux = float(np.mean(flux))
-    score = 0.0
-    if global_mean_flux > 1e-9:
-        ratio = mean_beat_flux / global_mean_flux
-        score = float(np.clip((ratio - 1.0) / 1.5, 0.0, 1.0))
-
-    return beat_times, downbeat_times, score
+    # STFT without boundary padding centers frame 0 at window / 2, where window = 4 * hop (default 1024/256)
+    win = window if window is not None else 4 * hop
+    beat_times = tuple(float((f * hop + (win // 2)) / sample_rate) for f in refined_frames)
+    return comb, phi, beat_times
 
 
 def _estimate_tempo(
     mono: np.ndarray, sample_rate: int, config: AnalysisConfig
-) -> tuple[float | None, float, int, bool, tuple[float, ...], tuple[float, ...]]:
+) -> tuple[float | None, float, int, bool]:
     min_bpm = max(1.0, float(config.tempo_min_bpm))
     max_bpm = max(min_bpm + 1.0, float(config.tempo_max_bpm))
     flux, hop = _onset_envelope(mono, sample_rate, config)
     if flux.size < 16:
-        return None, 0.0, 0, False, (), ()
+        return None, 0.0, 0, False
 
-    normalized = flux - float(np.mean(flux))
+    mean_flux = float(np.mean(flux))
+    std_flux = float(np.std(flux))
+    normalized = flux - mean_flux
     energy = float(np.sqrt(np.mean(np.square(normalized))))
-    if energy < 1e-9:
-        return None, 0.0, 0, False, (), ()
+    if energy < 1e-9 or mean_flux <= 1e-9:
+        return None, 0.0, 0, False
+
+    # Guard against stationary white noise / unmodulated signals (low coefficient of variation)
+    cv = std_flux / max(mean_flux, 1e-9)
+    if cv < 0.22:
+        return None, 0.0, 0, False
 
     frame_count = normalized.size
     fft_size = 1 << (2 * frame_count - 1).bit_length()
@@ -247,7 +230,7 @@ def _estimate_tempo(
     autocorrelation = np.fft.irfft(spectrum * np.conj(spectrum), n=fft_size)
     autocorrelation = autocorrelation[:frame_count]
     if autocorrelation[0] <= 0:
-        return None, 0.0, 0, False, (), ()
+        return None, 0.0, 0, False
     autocorrelation = autocorrelation / autocorrelation[0]
 
     frame_hz = sample_rate / hop
@@ -256,19 +239,12 @@ def _estimate_tempo(
     lag_min = max(2, lag_min)
     lag_max = min(frame_count - 2, lag_max)
     if lag_max <= lag_min:
-        return None, 0.0, 0, False, (), ()
+        return None, 0.0, 0, False
 
     search = autocorrelation[lag_min : lag_max + 1]
     best_offset = int(np.argmax(search))
     best_lag = lag_min + best_offset
-    confidence = float(np.clip(autocorrelation[best_lag], 0.0, 1.0))
-
-    ambiguous = False
-    for relative_lag in (best_lag / 2.0, best_lag * 2.0):
-        candidate = int(round(relative_lag))
-        if lag_min <= candidate <= lag_max:
-            if autocorrelation[candidate] >= 0.75 * autocorrelation[best_lag]:
-                ambiguous = True
+    autocorr_peak = float(np.clip(autocorrelation[best_lag], 0.0, 1.0))
 
     refined_lag = float(best_lag)
     if 0 < best_lag < frame_count - 1:
@@ -281,24 +257,117 @@ def _estimate_tempo(
             if abs(offset) < 1.0:
                 refined_lag += offset
 
-    tempo = 60.0 * frame_hz / refined_lag
-    if not min_bpm - 2.0 <= tempo <= max_bpm + 2.0:
-        return None, confidence, 0, ambiguous, (), ()
+    coarse_tempo = 60.0 * frame_hz / refined_lag
+    if not min_bpm - 2.0 <= coarse_tempo <= max_bpm + 2.0:
+        return None, 0.0, 0, False
 
-    peak_height = float(np.mean(flux) + np.std(flux))
+    # R1(b): Octave resolution BEFORE phase-locking at L, 2L (half-tempo), and L/2 (double-tempo)
+    # Weight comb strength with local autocorrelation support at the candidate lag so subharmonics
+    # (which always match a subset of 2x impulses in a circular sum) only win when backed by pulse periodicity.
+    candidate_lags: list[float] = [refined_lag]
+    if 60.0 * frame_hz / (2.0 * refined_lag) >= min_bpm:
+        candidate_lags.append(2.0 * refined_lag)
+    if 60.0 * frame_hz / (0.5 * refined_lag) <= max_bpm:
+        candidate_lags.append(0.5 * refined_lag)
+
+    cand_results: list[tuple[float, float, float]] = []
+    for cand_lam in candidate_lags:
+        c_comb, _, _ = _comb_phase_and_beats(flux, cand_lam, hop, sample_rate)
+        idx_lam = int(round(cand_lam))
+        ac_val = (
+            float(np.clip(autocorrelation[idx_lam], 0.0, 1.0))
+            if 0 < idx_lam < frame_count
+            else 0.0
+        )
+        # Effective octave score combines circular comb lock with autocorrelation periodicity at lag
+        eff_score = 0.55 * c_comb + 0.45 * ac_val
+        cand_results.append((eff_score, c_comb, cand_lam))
+
+    cand_results.sort(key=lambda item: item[0], reverse=True)
+    winner_eff, winner_comb, winner_lam = cand_results[0]
+
+    ambiguous = False
+    if len(cand_results) > 1:
+        runner_up_eff = cand_results[1][0]
+        if winner_eff > 1e-9 and runner_up_eff >= 0.85 * winner_eff:
+            ambiguous = True
+
+    tempo = 60.0 * frame_hz / winner_lam
+
+    peak_height = float(mean_flux + std_flux)
     peaks, _ = find_peaks(
         flux,
         height=peak_height,
         distance=max(1, int(round(0.08 * frame_hz))),
     )
 
-    beat_times, downbeats, beat_score = _track_beats_and_downbeats(flux, frame_hz, float(tempo), refined_lag)
-    combined_confidence = float(np.clip(0.6 * confidence + 0.4 * beat_score, 0.0, 1.0))
-    if combined_confidence < config.tempo_confidence_threshold or beat_score < 0.15 or len(peaks) < 4:
-        beat_times = ()
-        downbeats = ()
+    # R3: Calibrated blend of autocorrelation peak and circular comb vector strength
+    confidence = float(np.clip(0.25 * autocorr_peak + 0.75 * winner_comb, 0.0, 1.0))
+    if len(peaks) < 4:
+        confidence = min(confidence, 0.15)
 
-    return float(tempo), combined_confidence, int(len(peaks)), ambiguous, beat_times, downbeats
+    return float(tempo), confidence, int(len(peaks)), ambiguous
+
+
+def _build_beat_and_downbeat_grids(
+    mono: np.ndarray,
+    sample_rate: int,
+    duration_s: float,
+    tempo: float | None,
+    confidence: float,
+    config: AnalysisConfig,
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Construct phase-locked beat and 4/4 downbeat grids when rhythmic evidence is sufficient."""
+    if (
+        tempo is None
+        or tempo <= 0.0
+        or confidence < config.tempo_confidence_threshold
+    ):
+        return (), ()
+
+    flux, hop = _onset_envelope(mono, sample_rate, config)
+    if flux.size < 16:
+        return (), ()
+
+    frame_hz = sample_rate / hop
+    lam = 60.0 * frame_hz / tempo
+    stft_win = max(64, min(config.stft_window, 1 << int(np.floor(np.log2(mono.shape[0])))))
+    comb, _, raw_beats = _comb_phase_and_beats(flux, lam, hop, sample_rate, window=stft_win)
+    if comb <= 1e-6 or not raw_beats:
+        return (), ()
+
+    # Trim beats to [0, duration_s] and require >= 8 beats
+    beat_times = tuple(t for t in raw_beats if 0.0 <= t <= duration_s)
+    if len(beat_times) < 8:
+        return (), ()
+
+    downbeats = estimate_downbeats(mono, sample_rate, beat_times, beats_per_bar=4)
+    downbeat_times = tuple(t for t in downbeats if 0.0 <= t <= duration_s)
+    if not downbeat_times:
+        return (), ()
+
+    return beat_times, downbeat_times
+
+
+def _rbj_high_shelf_sos(
+    fc: float, gain_db: float, q: float, fs: int
+) -> np.ndarray:
+    """Design a 2nd-order RBJ audio EQ cookbook high-shelf biquad in SOS format."""
+    a = 10.0 ** (gain_db / 40.0)
+    w0 = 2.0 * np.pi * min(fc, 0.475 * fs) / fs
+    cos_w0 = float(np.cos(w0))
+    sin_w0 = float(np.sin(w0))
+    alpha = sin_w0 / (2.0 * q)
+    two_sqrt_a_alpha = 2.0 * np.sqrt(a) * alpha
+
+    b0 = a * ((a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha)
+    b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0)
+    b2 = a * ((a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha)
+    a0 = (a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha
+    a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cos_w0)
+    a2 = (a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha
+
+    return np.array([[b0 / a0, b1 / a0, b2 / a0, 1.0, a1 / a0, a2 / a0]], dtype=np.float64)
 
 
 def _compute_loudness(
@@ -306,7 +375,8 @@ def _compute_loudness(
 ) -> tuple[float | None, float | None, float | None]:
     """Compute EBU R128 loudness metrics (LUFS, LRA, True Peak).
 
-    Uses pyloudnorm if available; falls back to an ITU-R BS.1770 K-weighting filter proxy.
+    Uses pyloudnorm when installed; otherwise uses a pure NumPy/SciPy
+    ITU BS.1770 approximation, calibrated vs pyloudnorm.
     """
     if _PYLOUDNORM_AVAILABLE:
         try:
@@ -318,31 +388,59 @@ def _compute_loudness(
             lra = meter.loudness_range(mono)
             true_peak = amplitude_to_dbfs(buffer.peak)
 
-            return float(integrated_loudness), float(lra), float(true_peak)
+            if np.isfinite(integrated_loudness) and np.isfinite(lra):
+                return float(integrated_loudness), float(lra), float(true_peak)
         except Exception:
             pass
 
-    # Pure NumPy / SciPy ITU-R BS.1770 K-weighting filter proxy
     try:
-        sr = buffer.sample_rate
-        mono = buffer.mono()
-        # Stage 1: High-pass filter (~38 Hz 2nd-order Butterworth)
+        sr = int(buffer.sample_rate)
+        mono = buffer.mono().astype(np.float64, copy=False)
+        if mono.size == 0 or not np.all(np.isfinite(mono)):
+            return None, None, None
+
+        # Stage 1: 2nd-order Butterworth highpass at 38 Hz
         f_hp = min(38.0, 0.45 * (sr / 2.0))
-        sos_hp = signal.butter(2, f_hp, "highpass", fs=sr, output="sos")
-        y = signal.sosfilt(sos_hp, mono.astype(np.float64))
+        sos_hp = signal.butter(2, f_hp, btype="highpass", fs=sr, output="sos")
 
-        # Stage 2: High-shelf boost (~1500 Hz, +4 dB)
-        f_hs = min(1500.0, 0.45 * (sr / 2.0))
-        sos_hs = signal.butter(1, f_hs, "highpass", fs=sr, output="sos")
-        y_k = y + 0.585 * signal.sosfilt(sos_hs, y)
+        # Stage 2: RBJ high-shelf (+4.0 dB, ~1.5 kHz, Q=0.7)
+        sos_hs = _rbj_high_shelf_sos(fc=1500.0, gain_db=4.0, q=0.7, fs=sr)
+        sos_k = np.vstack([sos_hp, sos_hs])
 
-        mean_sq = float(np.mean(y_k ** 2))
-        if mean_sq > 1e-12:
-            lufs = -0.691 + 10.0 * np.log10(mean_sq)
+        y_k = signal.sosfilt(sos_k, mono)
+
+        # 400 ms non-overlapping RMS blocks (fallback to whole buffer if shorter than 400 ms)
+        block_samples = max(1, int(round(0.400 * sr)))
+        n_blocks = y_k.size // block_samples
+        if n_blocks >= 1:
+            blocks = y_k[: n_blocks * block_samples].reshape(n_blocks, block_samples)
+            block_powers = np.mean(np.square(blocks), axis=1)
         else:
-            lufs = -120.0
-        peak = amplitude_to_dbfs(buffer.peak)
-        return float(lufs), None, float(peak)
+            block_powers = np.array([ float(np.mean(np.square(y_k))) ], dtype=np.float64)
+
+        # Filter out absolute silence blocks (> -70 LUFS)
+        abs_thresh_power = 10.0 ** ((-70.0 + 0.691) / 10.0)
+        active_powers = block_powers[block_powers > abs_thresh_power]
+        if active_powers.size == 0:
+            return None, None, None
+
+        # One-pass relative gating: drop blocks > 10 LU below mean active block loudness
+        mean_un_lufs = -0.691 + 10.0 * np.log10(float(np.mean(active_powers)))
+        rel_gate_lufs = mean_un_lufs - 10.0
+        block_lufs = -0.691 + 10.0 * np.log10(active_powers)
+        gated_powers = active_powers[block_lufs >= rel_gate_lufs]
+        if gated_powers.size == 0:
+            gated_powers = active_powers
+
+        integrated_lufs = float(-0.691 + 10.0 * np.log10(float(np.mean(gated_powers))))
+        gated_lufs = -0.691 + 10.0 * np.log10(gated_powers)
+        lra = (
+            float(np.percentile(gated_lufs, 95.0) - np.percentile(gated_lufs, 10.0))
+            if gated_lufs.size >= 2
+            else 0.0
+        )
+        true_peak = amplitude_to_dbfs(buffer.peak)
+        return integrated_lufs, lra, float(true_peak)
     except Exception:
         return None, None, None
 
@@ -440,8 +538,16 @@ def analyze_track(
     if buffer.duration_s >= 1.0:
         mono = buffer.mono()
         try:
-            tempo, confidence, onset_count, ambiguous, beat_times, downbeat_times = _estimate_tempo(
+            tempo, confidence, onset_count, ambiguous = _estimate_tempo(
                 mono, buffer.sample_rate, cfg
+            )
+            beat_times, downbeat_times = _build_beat_and_downbeat_grids(
+                mono,
+                buffer.sample_rate,
+                buffer.duration_s,
+                tempo,
+                confidence,
+                cfg,
             )
         except Exception as exc:  # analysis must never prevent the rest of DCP
             raise AnalysisError(f"tempo estimation failed: {exc}") from exc
@@ -504,6 +610,7 @@ def analyze_track(
         tempo_ambiguous=ambiguous,
         beat_times_s=beat_times,
         downbeat_times_s=downbeat_times,
+        analyzer="basic",
         notes=tuple(notes),
         key=detected_key,
         key_confidence=detected_key_confidence,
@@ -521,3 +628,4 @@ def analyze_track(
         mfcc_mean=mfcc_mean,
         mfcc_std=mfcc_std,
     )
+
