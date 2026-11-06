@@ -1,5 +1,5 @@
-// DCP Web Studio - Frontend Application
-// Drag-and-drop song mixer with Spotify-style animated transition visualizer
+// DCP Web Studio — Autonomous Song C Composer
+// World-class UI: zero-config, DCP decides everything
 
 (function() {
     'use strict';
@@ -32,7 +32,6 @@
         songBDurationS: 0,
         currentMixId: null,
         mixUrl: null,
-        automixUrl: null,
         baselineUrl: null,
         lastResult: null,
         // Studio Remix (Song C) visual markers
@@ -62,6 +61,7 @@
         setupEventListeners();
         initCanvas();
         initAudioContext();
+        updateGenerateButtonState();
         console.log('DCP Web Studio initialized');
     }
 
@@ -81,9 +81,6 @@
         elements.trackDurB = document.getElementById('track-dur-b');
 
         // Controls
-        elements.strategySelect = document.getElementById('strategy-select');
-        elements.transitionDuration = document.getElementById('transition-duration');
-        elements.durationValue = document.getElementById('duration-value');
         elements.generateBtn = document.getElementById('generate-btn');
 
         // Player controls
@@ -93,6 +90,7 @@
         elements.scrubber = document.getElementById('scrubber');
         elements.compareToggle = document.getElementById('compare-toggle');
         elements.downloadBtn = document.getElementById('download-btn');
+        elements.jumpBtn = document.getElementById('jump-btn');
 
         // Visualizer
         elements.canvas = document.getElementById('visualizer-canvas');
@@ -112,174 +110,8 @@
         // Drag and drop
         setupDragAndDrop();
 
-        // Strategy selection UI synchronizer
-        function updateStrategyUI(strategy) {
-            const isRemix = strategy === 'studio_remix';
-            const sliderContainer = document.getElementById('duration-slider-container');
-            const badge = document.getElementById('autonomous-duration-badge');
-            const durationLabel = document.getElementById('duration-label');
-            const durationInput = document.getElementById('transition-duration');
-            const durationVal = document.getElementById('duration-value');
-
-            if (isRemix) {
-                if (sliderContainer) sliderContainer.style.display = 'none';
-                if (badge) badge.style.display = 'flex';
-                if (durationLabel) durationLabel.textContent = 'Bridge Duration';
-                if (durationInput) durationInput.disabled = true;
-            } else {
-                if (sliderContainer) sliderContainer.style.display = 'flex';
-                if (badge) badge.style.display = 'none';
-                if (durationLabel) durationLabel.textContent = 'Transition Duration (s)';
-                if (durationInput) {
-                    durationInput.disabled = false;
-                    if (durationVal) durationVal.textContent = `${parseFloat(durationInput.value).toFixed(1)}s`;
-                }
-            }
-        }
-
-        // Initialize strategy UI immediately on page load
-        updateStrategyUI(document.getElementById('strategy-select').value);
-
-        // Strategy selection change handler
-        document.getElementById('strategy-select').addEventListener('change', (e) => {
-            updateStrategyUI(e.target.value);
-        });
-
-        // Transition duration input handler
-        document.getElementById('transition-duration').addEventListener('input', (e) => {
-            const durationVal = document.getElementById('duration-value');
-            if (durationVal) durationVal.textContent = `${parseFloat(e.target.value).toFixed(1)}s`;
-        });
-
         // Generate button
         document.getElementById('generate-btn').addEventListener('click', handleGenerate);
-
-        // Generate transition handler
-        async function handleGenerate() {
-            // Validate both tracks are loaded with deck-specific guidance
-            if (!state.tracks.a.file && !state.tracks.b.file) {
-                alert('Please load both Song A and Song B before generating a transition.');
-                return;
-            }
-            if (!state.tracks.a.file) {
-                alert('Deck A is empty! Please load Song A into Deck A before generating a transition.');
-                return;
-            }
-            if (!state.tracks.b.file) {
-                alert('Deck B is empty! Please load Song B into Deck B before generating a transition.');
-                return;
-            }
-
-            // Get form values
-            const strategy = document.getElementById('strategy-select').value;
-            const transitionDuration = parseFloat(document.getElementById('transition-duration').value) || 8.0;
-
-            // Show loading state
-            const generateBtn = document.getElementById('generate-btn');
-            const originalBtnText = generateBtn.innerHTML;
-            generateBtn.disabled = true;
-            generateBtn.innerHTML = '<div class="loading-spinner"></div><span>Composing Song C...</span>';
-
-            try {
-                // Prepare form data with modular feature flags
-                const formData = new FormData();
-                formData.append('song_a', state.tracks.a.file);
-                formData.append('song_b', state.tracks.b.file);
-                formData.append('strategy', strategy);
-                formData.append('transition_duration', transitionDuration);
-
-                const curveSelect = document.getElementById('crossfade-curve-select');
-                if (curveSelect) {
-                    formData.append('crossfade_curve', curveSelect.value);
-                }
-
-                const toggleIds = [
-                    'dcp_zdf_sweeps',
-                    'dcp_fdn_freeze',
-                    'dcp_sidechain_duck',
-                    'dcp_generative_assets',
-                    'dcp_vocal_chops',
-                    'dcp_drum_regroove',
-                    'dcp_master_glue',
-                ];
-                toggleIds.forEach((id) => {
-                    const el = document.getElementById(id);
-                    if (el) {
-                        formData.append(id, el.checked ? 'true' : 'false');
-                    }
-                });
-
-                // Call the mix API
-                const response = await fetch('/api/mix', {
-                    method: 'POST',
-                    body: formData
-                });
-
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.error || 'Failed to generate transition');
-                }
-
-                const result = await response.json();
-                state.lastResult = result;
-
-                // Store the mix URL and ID for playback/download
-                state.currentMixId = result.mix_id;
-                state.mixUrl = result.mix_url;
-                state.duration = result.duration_s || 0;
-                state.transitionStartS = result.transition_start_s || 0;
-                state.transitionDurationS = result.transition_duration_s || 8;
-                state.songADurationS = result.song_a_duration_s || 0;
-                state.songBDurationS = result.song_b_duration_s || 0;
-                state.currentTime = 0;
-                state.audioBuffer = null;
-
-                // Update visualizer data
-                if (result.waveform_a) state.visualizerData.mix = result.waveform_a;
-                if (result.waveform_b) state.visualizerData.baseline = result.waveform_b;
-
-                // Extract Studio Remix metadata if available
-                if (result.metadata && result.metadata.studio_remix) {
-                    const meta = result.metadata;
-                    state.studioRemix = {
-                        launchpadS: meta.launchpad_a_s || null,
-                        impactS: meta.impact_b_s || null,
-                        breathStartS: meta.breath_start_s || null,
-                        breathEndS: meta.breath_end_s || null,
-                        bridgeStartS: meta.bridge_start_a_s || null,
-                        bridgeBars: meta.total_bridge_bars || 12,
-                        phaseLocked: meta.phase_locked || false,
-                        lowEndMonogamy: meta.low_end_monogamy || false,
-                        zdfSweeps: meta.zdf_filter_sweeps || false,
-                        ghostResolution: meta.ghost_resolution || false,
-                        sidechainDucking: meta.sidechain_ducking || false,
-                    };
-                } else {
-                    state.studioRemix = { phaseLocked: false };
-                }
-
-                // Populate Transition Details panel
-                renderTransitionDetails(result);
-
-                // Update visualizer
-                updateTimeDisplay(0, state.duration);
-                handleResize();
-
-                // Enable player and download
-                document.getElementById('play-btn').disabled = false;
-                document.getElementById('download-btn').disabled = false;
-
-                // Pre-buffer DCP master mix for zero-latency playback
-                preloadDcpAudioBuffer();
-            } catch (error) {
-                console.error('Generation failed:', error);
-                alert('Failed to generate transition: ' + error.message);
-            } finally {
-                // Restore button
-                generateBtn.disabled = false;
-                generateBtn.innerHTML = originalBtnText;
-            }
-        }
 
         // Player controls
         document.getElementById('play-btn').addEventListener('click', togglePlay);
@@ -307,6 +139,14 @@
 
         // Download
         document.getElementById('download-btn').addEventListener('click', handleDownload);
+
+        // Swap decks
+        document.getElementById('swap-btn').addEventListener('click', swapDecks);
+
+        // Compare toggle
+        document.getElementById('compare-toggle').addEventListener('change', (e) => {
+            // Comparison toggle handled in renderVisualizer
+        });
 
         // Swap decks
         document.getElementById('swap-btn').addEventListener('click', swapDecks);
@@ -350,7 +190,7 @@
                 if (isAudioFile(file)) {
                     handleFileUpload(file, deck);
                 } else if (file) {
-                    alert('Please drop an audio file (.wav, .mp3, .flac, .ogg, .m4a)');
+                    alert('Please drop an audio file (.wav, .mp3, .flac, .ogg, .m4a, .aac, .aiff)');
                 }
             });
 
@@ -383,17 +223,73 @@
         const track = state.tracks[deck];
         track.file = file;
 
-        // Show loading state
+        // Show loading state with staged progress
         const zone = document.getElementById(`drop-zone-${deck}`);
         zone.classList.remove('has-file');
         zone.classList.add('loading');
-        zone.innerHTML = '<div class="loading-spinner"></div><p>Analyzing audio...</p>';
+
+        // Progress tracking
+        const analysisStart = Date.now();
+        const stages = [
+            { text: 'Uploading audio...', progress: 10 },
+            { text: 'Loading audio...', progress: 20 },
+            { text: 'Detecting tempo & downbeats...', progress: 40 },
+            { text: 'Separating stems (vocals, drums, bass, other)...', progress: 70 },
+            { text: 'Analyzing harmony & structure...', progress: 90 },
+            { text: 'Finalizing analysis...', progress: 100 }
+        ];
+        let currentStage = 0;
+
+        function updateProgress(stageIndex, elapsed) {
+            const stage = stages[stageIndex];
+            const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
+            zone.innerHTML = `
+                <div class="loading-spinner"></div>
+                <p class="progress-text">${stage.text}</p>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: ${stage.progress}%"></div>
+                </div>
+                <p class="progress-timer">${elapsedSec}s elapsed</p>
+            `;
+        }
+
+        const startTime = Date.now();
+        let progressInterval = setInterval(() => {
+            const elapsed = (Date.now() - startTime) / 1000;
+            const estimatedTotal = 60; // estimated max seconds
+            const progress = Math.min(95, (elapsed / estimatedTotal) * 100);
+
+            // Update stage based on elapsed time
+            let stageIdx = 0;
+            if (elapsed > 5) stageIdx = 1;
+            if (elapsed > 15) stageIdx = 2;
+            if (elapsed > 40) stageIdx = 3;
+            if (elapsed > 55) stageIdx = 4;
+            if (elapsed > 59) stageIdx = 5;
+
+            if (stageIdx !== currentStage) {
+                currentStage = stageIdx;
+                updateProgress(currentStage, (Date.now() - startTime) / 1000);
+            } else {
+                const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                const stage = stages[currentStage];
+                zone.innerHTML = `
+                    <div class="loading-spinner"></div>
+                    <p class="progress-text">${stages[currentStage].text}</p>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${Math.min(95, (Date.now() - startTime) / 60000 * 100)}%"></div>
+                    </div>
+                    <p class="progress-timer">${((Date.now() - startTime) / 1000).toFixed(1)}s elapsed</p>
+                `;
+            }
+        }, 500);
 
         // Create object URL for preview
         track.objectUrl = URL.createObjectURL(file);
 
         // Analyze the file
         analyzeAudioFile(file, deck).then(analysis => {
+            clearInterval(progressInterval);
             state.tracks[deck].analysis = analysis;
             track.file = file;
             track.waveform = generateWaveformPlaceholder(); // Placeholder until real analysis
@@ -412,6 +308,7 @@
                 <p class="file-size">${formatFileSize(file.size)}</p>
             `;
         }).catch(err => {
+            clearInterval(progressInterval);
             console.error('Quick analysis warning:', err);
             // Even if quick analysis fails, preserve the audio file so generation can decompose and process it
             zone.classList.remove('loading');
@@ -532,6 +429,7 @@
         } catch (e) {}
         try { src.stop(); } catch (e) {}
         try { src.disconnect(); } catch (e) {}
+        try { gain.disconnect(); } catch (e) {}
     }
 
     function startSourceAt(audioBuffer, offset) {
@@ -591,10 +489,6 @@
                 alert('Failed to load audio: ' + err.message);
             });
     }
-                console.error('Failed to load audio:', err);
-                alert('Failed to load audio: ' + err.message);
-            });
-    }
 
     function stopPlayback() {
         if (state.audioSource) {
@@ -631,8 +525,10 @@
         const btn = document.getElementById('play-btn');
         if (playing) {
             btn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+            btn.setAttribute('aria-pressed', 'true');
         } else {
             btn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21"/></svg>';
+            btn.setAttribute('aria-pressed', 'false');
         }
     }
 
@@ -644,7 +540,7 @@
         renderVisualizer();
 
         if (state.isPlaying) {
-            const buffer = state.audioBuffers[state.currentMode];
+            const buffer = state.audioBuffer;
             if (buffer) {
                 startSourceAt(buffer, state.currentTime);
             }
@@ -1182,7 +1078,7 @@
                 <span class="info-value">${peakStr} / ${rmsStr}</span>
             </div>
             <div class="info-item">
-                <span class="info-label">Stereo Phase &amp; Studio QC</span>
+                <span class="info-label">Stereo Phase & Studio QC</span>
                 <span class="info-value">${corrStr} (${qcPass ? 'PASS' : 'WARN'})</span>
             </div>
         `;
@@ -1230,6 +1126,185 @@
     }
 
     // ============================================================
+    // GENERATE HANDLER
+    // ============================================================
+    async function handleGenerate() {
+        // Validate both tracks are loaded
+        if (!state.tracks.a.file || !state.tracks.b.file) {
+            alert('Please load both Song A and Song B before generating a transition.');
+            return;
+        }
+
+        // Show loading overlay
+        const loadingOverlay = document.getElementById('loading-overlay');
+        loadingOverlay.classList.add('visible');
+        updateLoadingStage('Analyzing tracks...', 0);
+
+        // Show loading state on button
+        const generateBtn = document.getElementById('generate-btn');
+        const originalBtnText = generateBtn.innerHTML;
+        generateBtn.disabled = true;
+        generateBtn.classList.add('loading');
+        generateBtn.innerHTML = '<div class="loading-spinner"></div><span>Composing Song C...</span>';
+
+        try {
+            // Prepare form data - DCP decides everything autonomously
+            const formData = new FormData();
+            formData.append('song_a', state.tracks.a.file);
+            formData.append('song_b', state.tracks.b.file);
+            formData.append('strategy', 'studio_remix'); // DCP always uses Studio Remix
+
+            // Call the mix API
+            updateLoadingStage('Composing Song C...', 30);
+            const response = await fetch('/api/mix', {
+                method: 'POST',
+                body: formData
+            });
+
+            updateLoadingStage('Rendering master mix...', 70);
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || 'Failed to generate transition');
+            }
+
+            updateLoadingStage('Finalizing master...', 90);
+
+            const result = await response.json();
+            state.lastResult = result;
+
+            // Store the mix URL and ID for playback/download
+            state.currentMixId = result.mix_id;
+            state.mixUrl = result.mix_url;
+            state.baselineUrl = result.baseline_url;
+            state.duration = result.duration_s || 0;
+            state.transitionStartS = result.transition_start_s || 0;
+            state.transitionDurationS = result.transition_duration_s || 8;
+            state.songADurationS = result.song_a_duration_s || 0;
+            state.songBDurationS = result.song_b_duration_s || 0;
+            state.currentTime = 0;
+            state.audioBuffer = null;
+
+            // Update visualizer data
+            if (result.waveform_a) state.visualizerData.mix = result.waveform_a;
+            if (result.waveform_b) state.visualizerData.baseline = result.waveform_b;
+
+            // Extract Studio Remix metadata if available
+            if (result.metadata && result.metadata.studio_remix) {
+                const meta = result.metadata;
+                state.studioRemix = {
+                    launchpadS: meta.launchpad_a_s || null,
+                    impactS: meta.impact_b_s || null,
+                    breathStartS: meta.breath_start_s || null,
+                    breathEndS: meta.breath_end_s || null,
+                    bridgeStartS: meta.bridge_start_a_s || null,
+                    bridgeBars: meta.total_bridge_bars || 12,
+                    phaseLocked: meta.phase_locked || false,
+                    lowEndMonogamy: meta.low_end_monogamy || false,
+                    zdfSweeps: meta.zdf_filter_sweeps || false,
+                    ghostResolution: meta.ghost_resolution || false,
+                    sidechainDucking: meta.sidechain_ducking || false,
+                };
+            } else {
+                state.studioRemix = { phaseLocked: false };
+            }
+
+            // Populate Transition Details panel
+            renderTransitionDetails(result);
+
+            // Update visualizer
+            updateTimeDisplay(0, state.duration);
+            handleResize();
+
+            // Enable player and download
+            document.getElementById('play-btn').disabled = false;
+            document.getElementById('download-btn').disabled = false;
+            document.getElementById('download-btn').hidden = false;
+
+            // Hide loading overlay
+            document.getElementById('loading-overlay').classList.remove('visible');
+
+            // Pre-buffer DCP master mix for zero-latency playback
+            preloadDcpAudioBuffer();
+
+            // Show success toast
+            showToast('Song C composed successfully!', 'success');
+        } catch (error) {
+            console.error('Generation failed:', error);
+            document.getElementById('loading-overlay').classList.remove('visible');
+            alert('Failed to generate transition: ' + error.message);
+        } finally {
+            // Restore button
+            const generateBtn = document.getElementById('generate-btn');
+            generateBtn.disabled = false;
+            generateBtn.classList.remove('loading');
+            generateBtn.innerHTML = `
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                    <path d="M2 17l10 5 10-5"/>
+                    <path d="M2 12l10 5 10-5"/>
+                </svg>
+                <span>Generate DCP Transition</span>
+            `;
+        }
+    }
+
+    function updateLoadingStage(text, progress) {
+        const stageEl = document.getElementById('loading-stage');
+        const progressEl = document.getElementById('loading-progress');
+        const hintEl = document.getElementById('loading-hint');
+
+        if (stageEl) stageEl.textContent = text;
+        if (progressEl) progressEl.style.width = `${progress}%`;
+
+        const hints = [
+            'Analyzing phrase structure & harmonic compatibility...',
+            'Selecting optimal launchpad & impact downbeats...',
+            'Computing autonomous 12–16 bar bridge structure...',
+            'Applying ZDF sweeps, sidechain ducking & ghost freeze...',
+            'Rendering master mix with studio-grade DSP...'
+        ];
+        const hintIndex = Math.floor(progress / 20);
+        if (hintEl && hints[hintIndex]) {
+            hintEl.textContent = hints[hintIndex];
+        }
+    }
+
+    function showToast(message, type = 'info') {
+        const container = document.getElementById('toast-container');
+        const toast = document.createElement('div');
+        toast.className = `toast ${type}`;
+        toast.innerHTML = `
+            <svg class="toast-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                ${type === 'success' ? '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>' : type === 'error' ? '<circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>' : type === 'warning' ? '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>' : '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>'}
+            </svg>
+            <span class="toast-message">${message}</span>
+            <button class="toast-close" aria-label="Dismiss">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+        `;
+        container.appendChild(toast);
+
+        // Auto-dismiss after 5 seconds
+        setTimeout(() => {
+            toast.style.animation = 'slideIn 0.3s ease-in-out reverse';
+            setTimeout(() => toast.remove(), 300);
+        }, 5000);
+
+        // Close button
+        toast.querySelector('.toast-close').addEventListener('click', () => {
+            toast.style.animation = 'slideIn 0.3s ease-in-out reverse';
+            setTimeout(() => toast.remove(), 300);
+        });
+    }
+
+    function updateGenerateButtonState() {
+        const generateBtn = document.getElementById('generate-btn');
+        const hasBothFiles = state.tracks.a.file && state.tracks.b.file;
+        generateBtn.disabled = !hasBothFiles;
+    }
+
+    // ============================================================
     // INITIALIZATION
     // ============================================================
     function init() {
@@ -1237,7 +1312,8 @@
         cacheElements();
         setupEventListeners();
         initCanvas();
-        console.log('DCP Web Studio initialized');
+        updateGenerateButtonState();
+        console.log('DCP Web Studio initialized — Autonomous Song C Composer ready');
     }
 
     // ============================================================
