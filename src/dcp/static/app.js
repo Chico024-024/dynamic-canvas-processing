@@ -307,6 +307,8 @@
                 <p class="file-name">${file.name}</p>
                 <p class="file-size">${formatFileSize(file.size)}</p>
             `;
+            // Enable generate button if both tracks have files
+            updateGenerateButtonState();
         }).catch(err => {
             clearInterval(progressInterval);
             console.error('Quick analysis warning:', err);
@@ -322,6 +324,9 @@
                 <p class="file-size">${formatFileSize(file.size)}</p>
             `;
         });
+
+        // Enable generate button if both tracks have files
+        updateGenerateButtonState();
     }
 
     function analyzeAudioFile(file, deck) {
